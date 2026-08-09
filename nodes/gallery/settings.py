@@ -37,6 +37,8 @@ def default_settings() -> dict[str, Any]:
         "selectionStamp": "quarantineQualified",
         "timeout": 30,
         "cacheBudgetMiB": 1024,
+        "gachaMaxPosts": 0,
+        "animaMode": False,
         "credentials": {
             "danbooru": {"username": "", "apiKey": ""},
             "gelbooru": {"userId": "", "apiKey": ""},
@@ -103,12 +105,17 @@ class GallerySettingsStore:
             raise ValueError("defaultSource is invalid")
         timeout = int(settings.get("timeout", 30))
         budget = int(settings.get("cacheBudgetMiB", 1024))
+        gacha_max = int(settings.get("gachaMaxPosts", 0))
         if not 3 <= timeout <= 300:
             raise ValueError("timeout must be between 3 and 300 seconds")
         if not 128 <= budget <= 32768:
             raise ValueError("cacheBudgetMiB must be between 128 and 32768")
+        if not 0 <= gacha_max <= 99999:
+            raise ValueError("gachaMaxPosts must be between 0 and 99999")
         settings["timeout"] = timeout
         settings["cacheBudgetMiB"] = budget
+        settings["gachaMaxPosts"] = gacha_max
+        settings["animaMode"] = bool(settings.get("animaMode", False))
         settings["blacklist"] = _string_list(settings.get("blacklist", []), "blacklist")
         settings["outputFilterTags"] = _string_list(settings.get("outputFilterTags", []), "outputFilterTags")
         prompt = settings.get("promptDefaults")
@@ -143,7 +150,7 @@ class GallerySettingsStore:
             raise ValueError("settings update must be an object")
         with self._lock:
             settings = self.load()
-            for key in ("defaultSource", "blacklist", "outputFilterTags", "promptDefaults", "tooltip", "selectionStamp", "timeout", "cacheBudgetMiB"):
+            for key in ("defaultSource", "blacklist", "outputFilterTags", "promptDefaults", "tooltip", "selectionStamp", "timeout", "cacheBudgetMiB", "gachaMaxPosts", "animaMode"):
                 if key in update:
                     settings[key] = copy.deepcopy(update[key])
             credential_update = update.get("credentials", {})

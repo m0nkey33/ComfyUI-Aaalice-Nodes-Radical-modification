@@ -61,6 +61,7 @@ class PromptOptions:
     categories: tuple[str, ...] = DEFAULT_PROMPT_CATEGORIES
     replace_underscores: bool = False
     escape_parentheses: bool = False
+    anima_mode: bool = False
     excluded_tags: tuple[str, ...] = ()
     # 两组标签都会从提示词中剔除；区别在浏览层：blacklist 还会隐藏帖子，输出过滤不影响帖子可见性。
     output_filter_tags: tuple[str, ...] = ()
@@ -99,6 +100,7 @@ def parse_gallery_payload(payload_json: str) -> tuple[list[GallerySelection], Pr
         categories=categories,
         replace_underscores=bool(raw_prompt.get("replaceUnderscores", False)),
         escape_parentheses=bool(raw_prompt.get("escapeParentheses", False)),
+        anima_mode=bool(raw_prompt.get("animaMode", False)),
         excluded_tags=_tags(raw_prompt.get("excludedTags", [])),
         output_filter_tags=_tags(raw_prompt.get("outputFilterTags", [])),
     )
@@ -152,6 +154,8 @@ def compose_prompt(selection: GallerySelection, options: PromptOptions) -> str:
             rendered = tag.replace("_", " ") if options.replace_underscores else tag
             if options.escape_parentheses:
                 rendered = rendered.replace("(", r"\(").replace(")", r"\)")
+            if category == "artist" and options.anima_mode:
+                rendered = f"@{rendered}"
             result.append(rendered)
     return ", ".join(result)
 

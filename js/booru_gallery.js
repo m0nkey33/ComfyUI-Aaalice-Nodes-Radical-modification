@@ -437,7 +437,35 @@ function setupNode(node, { initializeSize = false } = {}) {
 	const openSettings = button({ className: "aa-gallery-toolbar-text-action aa-gallery-open-settings", iconName: "settings", label: label("settings.short", "Settings"), title: label("settings.open", "Configure Gallery…"), variant: "ghost", size: "sm", onClick: openGallerySettings });
 	const browseNavigation = el("div", { className: "aa-gallery-toolbar__navigation", children: [collection, pageControl] });
 	const browseTools = el("div", { className: "aa-gallery-toolbar__tools", children: [filter, prompt] });
-	const pageActions = el("div", { className: "aa-gallery-toolbar__page-actions", attrs: { role: "group", "aria-label": label("toolbarActions", "Browse tools") }, children: [browseNavigation, browseTools] });
+	const gachaToggle = button({
+		className: "aa-gallery-toolbar-action is-gacha-toggle",
+		iconName: "shuffle",
+		label: label("gacha.toggle", "Gacha"),
+		title: label("gacha.toggleOff", "Random draw is off"),
+		variant: "ghost",
+		size: "sm",
+		onClick: () => {
+			const enabled = !stateFor(node).gachaEnabled;
+			transact(node, (state) => { state.gachaEnabled = enabled; });
+			gachaToggle.classList.toggle("is-active", enabled);
+			gachaDraw.hidden = !enabled;
+			gachaToggle.title = enabled ? label("gacha.toggleOn", "Random draw is on · Click to disable") : label("gacha.toggleOff", "Random draw is off · Click to enable");
+			gachaToggle.setAttribute("aria-pressed", String(enabled));
+			if (enabled) controller.startAutoLoad(settings?.gachaMaxPosts); else controller.stopAutoLoad();
+		},
+	});
+	gachaToggle.setAttribute("aria-pressed", "false");
+	const gachaDraw = iconButton({
+		className: "aa-gallery-toolbar-action is-gacha-draw",
+		iconName: "shuffle",
+		label: label("gacha.draw", "Draw"),
+		title: label("gacha.drawHint", "Randomly select one post from the current page"),
+		variant: "ghost",
+		onClick: () => controller.drawRandom(),
+	});
+	gachaDraw.hidden = true;
+	const gachaTools = el("div", { className: "aa-gallery-toolbar__tools is-gacha", children: [gachaToggle, gachaDraw] });
+	const pageActions = el("div", { className: "aa-gallery-toolbar__page-actions", attrs: { role: "group", "aria-label": label("toolbarActions", "Browse tools") }, children: [browseNavigation, browseTools, gachaTools] });
 	const selectedSummaryText = el("span", null, "");
 	const selectedSummary = el("div", { className: "aa-gallery-toolbar__selected-summary", attrs: { role: "status" }, children: [icon("statusCheck"), selectedSummaryText] });
 	const searchActions = el("div", { className: "aa-gallery-toolbar__search", children: [searchControl.root, searchControl.toggle] });
@@ -527,7 +555,7 @@ function setupNode(node, { initializeSize = false } = {}) {
 		scrollSettleTimer = setTimeout(settleScroll, 150);
 	};
 	masonry.addEventListener("scroll", markScrolling, { passive: true });
-	controller = buildController(node, elements); node._aaGalleryController = controller; node._aaGalleryRoot = root; node._aaGallerySource = source; node._aaGallerySearch = searchControl; node._aaGalleryCollection = collection; node._aaGalleryPage = pageControl; node._aaGallerySelectionMode = selectionMode; node._aaGalleryAccent = bindNodeAccent(node, [root, selectedDropIndicator]);
+	controller = buildController(node, elements); node._aaGalleryController = controller; node._aaGalleryRoot = root; node._aaGallerySource = source; node._aaGallerySearch = searchControl; node._aaGalleryCollection = collection; node._aaGalleryPage = pageControl; node._aaGallerySelectionMode = selectionMode; node._aaGalleryGachaToggle = gachaToggle; node._aaGalleryGachaDraw = gachaDraw; node._aaGalleryAccent = bindNodeAccent(node, [root, selectedDropIndicator]);
 	node._aaGalleryCardMotion = installMasonryCardMotion(masonry);
 	node._aaGalleryVisibility = observeDOMWidgetVisibility(root, { onChange: (active) => { elements.masonryController?.setActive(active); elements.selectedList?.setActive(active); } });
 	error.addEventListener("click", () => {
@@ -559,6 +587,15 @@ function setupNode(node, { initializeSize = false } = {}) {
 		root.remove();
 		return previousRemoved?.apply(this, arguments);
 	};
+	const syncGachaUI = () => {
+		const enabled = stateFor(node).gachaEnabled;
+		gachaToggle.classList.toggle("is-active", enabled);
+		gachaDraw.hidden = !enabled;
+		gachaToggle.setAttribute("aria-pressed", String(enabled));
+		gachaToggle.title = enabled ? label("gacha.toggleOn", "Random draw is on · Click to disable") : label("gacha.toggleOff", "Random draw is off · Click to enable");
+		if (enabled) controller.startAutoLoad(settings?.gachaMaxPosts); else controller.stopAutoLoad();
+	};
+	syncGachaUI();
 	controller.renderSelected(); controller.search({ reset: true, page: stateFor(node).navigation.page }); applyInitialGallerySize(node, initializeSize);
 }
 
@@ -575,6 +612,14 @@ function restoreNode(node) {
 	node._aaGalleryController.setSelectionMode(state.selectionMode, { persist: false });
 	node._aaGalleryController.renderSelected();
 	void node._aaGalleryController.search({ reset: true, page: state.navigation.page });
+	if (node._aaGalleryGachaToggle) {
+		const gachaEnabled = Boolean(state.gachaEnabled);
+		node._aaGalleryGachaToggle.classList.toggle("is-active", gachaEnabled);
+		node._aaGalleryGachaToggle.setAttribute("aria-pressed", String(gachaEnabled));
+		node._aaGalleryGachaToggle.title = gachaEnabled ? label("gacha.toggleOn", "Random draw is on · Click to disable") : label("gacha.toggleOff", "Random draw is off · Click to enable");
+		if (node._aaGalleryGachaDraw) node._aaGalleryGachaDraw.hidden = !gachaEnabled;
+		if (gachaEnabled) node._aaGalleryController.startAutoLoad(settings?.gachaMaxPosts); else node._aaGalleryController.stopAutoLoad();
+	}
 	node._aaGalleryAccent?.sync?.();
 }
 
@@ -603,7 +648,19 @@ function installPromptHook() {
 		const output = result?.output ?? result;
 		for (const node of allGraphNodes(app.graph)) {
 			if (!isGallery(node)) continue;
-			const payload = JSON.stringify(galleryPayload(stateFor(node), settings?.blacklist, settings?.outputFilterTags));
+			// Gacha auto-draw: load posts if needed, then randomly pick before serializing.
+			if (stateFor(node).gachaEnabled && node._aaGalleryController) {
+				try {
+					if (!node._aaGalleryController.hasPosts()) {
+						await node._aaGalleryController.search({ reset: true, page: 1 });
+					}
+					const drawn = await node._aaGalleryController.pickRandomSelection();
+					if (drawn) stateFor(node).selections = [drawn.selection];
+				} catch (error) {
+					console.error("[Aaalice] Gacha auto-draw failed during queue", error);
+				}
+			}
+			const payload = JSON.stringify(galleryPayload(stateFor(node), settings?.blacklist, settings?.outputFilterTags, settings?.animaMode));
 			for (const promptNode of promptNodesForGraphNode(output, node)) {
 				promptNode.inputs ||= {};
 				promptNode.inputs.gallery_payload = payload;

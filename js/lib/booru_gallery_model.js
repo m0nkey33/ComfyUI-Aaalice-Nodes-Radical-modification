@@ -46,6 +46,7 @@ export function defaultGalleryState(settings = {}) {
 			categories: strings(defaults.categories || DEFAULT_PROMPT_CATEGORIES).filter((item) => GALLERY_CATEGORIES.includes(item)),
 			replaceUnderscores: Boolean(defaults.replaceUnderscores), escapeParentheses: Boolean(defaults.escapeParentheses),
 		},
+		gachaEnabled: false,
 		selections: [],
 	};
 }
@@ -72,6 +73,7 @@ export function normalizeGalleryState(value, settings = {}) {
 		navigation: { page: Math.max(1, Math.floor(Number(value.navigation?.page) || 1)) },
 		prompt: { categories, replaceUnderscores: Boolean(value.prompt?.replaceUnderscores),
 			escapeParentheses: Boolean(value.prompt?.escapeParentheses) },
+		gachaEnabled: Boolean(value.gachaEnabled),
 		selections: selectionMode === "single" ? selections.slice(0, 1) : selections,
 	};
 }
@@ -95,9 +97,9 @@ export function finalPrompt(selection, prompt) {
 	return result.join(", ");
 }
 
-export function galleryPayload(state, excludedTags = [], outputFilterTags = []) {
+export function galleryPayload(state, excludedTags = [], outputFilterTags = [], animaMode = false) {
 	const normalized = normalizeGalleryState(state);
-	const prompt = { ...structuredClone(normalized.prompt), excludedTags: strings(excludedTags), outputFilterTags: strings(outputFilterTags) };
+	const prompt = { ...structuredClone(normalized.prompt), excludedTags: strings(excludedTags), outputFilterTags: strings(outputFilterTags), animaMode: Boolean(animaMode) };
 	return { version: 1, prompt, selections: normalized.selections.map((item) => structuredClone(item)),
 		prompts: normalized.selections.map((item) => finalPrompt(item, prompt)) };
 }

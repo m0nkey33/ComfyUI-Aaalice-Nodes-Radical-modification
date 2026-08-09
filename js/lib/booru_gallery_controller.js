@@ -651,6 +651,31 @@ return function buildController(node, elements) {
 		const save = button({ label: label("editor.save", "Save local tags"), variant: "primary", onClick: () => { const edited = values(); if (selectedIndex >= 0) transact(node, (state) => { state.selections[selectedIndex].editedTags = edited; }); else sessionEdits.set(key, edited); renderSelected(); dialog.close(); } });
 		dialog = createDialog({ title: label("editor.title", "Edit local tags"), body, footer: el("div", { className: "aa-gallery-dialog-actions", children: [restore, copy, save] }), size: "lg", className: "aa-gallery-tag-editor-dialog", confirmOnEnter: false });
 	};
+	const pickRandomSelection = async () => {
+		if (!posts.length) return null;
+		const index = Math.floor(Math.random() * posts.length);
+		const post = posts[index];
+		const detail = await getDetail(post);
+		const selection = selectionFromDetail(detail, sessionEdits.get(`${post.source}:${post.postId}`));
+		if (!selection) throw new Error(label("error.incomplete", "The post detail is incomplete."));
+		return { post, selection };
+	};
+	const drawRandom = async () => {
+		try {
+			const result = await pickRandomSelection();
+			if (!result) {
+				app.extensionManager.toast.add({ severity: "warning", summary: label("gacha.title", "Random draw"), detail: label("gacha.noPosts", "No posts on the current page. Try loading a page first."), life: 4000 });
+				return;
+			}
+			transact(node, (state) => { state.selections = [result.selection]; });
+			renderSelected();
+			refreshCards();
+			app.extensionManager.toast.add({ severity: "success", summary: label("gacha.title", "Random draw"), detail: label("gacha.drawn", "Randomly selected post #{id}").replace("{id}", result.post.postId), life: 3200 });
+		} catch (error) {
+			console.error("[Aaalice] Random draw failed", error);
+			app.extensionManager.toast.add({ severity: "error", summary: label("gacha.title", "Random draw"), detail: error.message, life: 5000 });
+		}
+	};
 	return {
 		tooltip,
 		get selectedDragFrom() { return selectedDragFrom; },
@@ -676,10 +701,31 @@ return function buildController(node, elements) {
 		setMode,
 		setSelectionMode,
 		showError,
+		drawRandom,
+		pickRandomSelection,
+		hasPosts() { return posts.length > 0; },
+		autoLoadTimer: 0,
+		startAutoLoad(maxPosts = 0) {
+			if (this.autoLoadTimer) return;
+			const limit = Math.max(0, Number(maxPosts) || 0);
+			const loop = () => {
+				if (destroyed || ended || (limit > 0 && posts.length >= limit)) { this.stopAutoLoad(); return; }
+				if (loading) { this.autoLoadTimer = setTimeout(loop, 1000); return; }
+				search().finally(() => {
+					if (!this.autoLoadTimer) return;
+					this.autoLoadTimer = setTimeout(loop, 2000);
+				});
+			};
+			this.autoLoadTimer = setTimeout(loop, 500);
+		},
+		stopAutoLoad() {
+			clearTimeout(this.autoLoadTimer); this.autoLoadTimer = 0;
+		},
 		updateSize(post, width, height) { elements.masonryController.updateItemSize(`${post.source}:${post.postId}`, width, height); },
 		destroy() {
 			destroyed = true; generation += 1; detailDialogGeneration += 1;
 			clearTimeout(pageCommitTimer); pageCommitTimer = 0;
+			this.stopAutoLoad();
 			clearTimeout(prefetchTimer); prefetchTimer = 0;
 			requestController?.abort();
 			activeDetailDialog?.close(); activeDetailDialog = null;

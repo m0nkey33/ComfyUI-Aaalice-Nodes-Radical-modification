@@ -65,6 +65,9 @@
 .aa-gallery-toolbar-action.aa-ui-button { min-height: 26px; gap: 6px; padding: 4px 8px; border-radius: 7px; opacity: .86; font-size: 10px; font-weight: 620; letter-spacing: .01em; }
 .aa-gallery-toolbar-action.aa-ui-button:hover, .aa-gallery-toolbar-action.aa-ui-button:focus-visible, .aa-gallery-toolbar-action.aa-ui-button.is-open { border-color: color-mix(in srgb, var(--aa-ui-node-accent) 30%, transparent); opacity: 1; background: color-mix(in srgb, var(--aa-ui-node-accent) 10%, var(--aa-ui-control)); color: var(--aa-ui-text); transform: translateY(-1px); }
 .aa-gallery-toolbar-action .aa-ui-icon { width: 13px; height: 13px; }
+.aa-gallery-toolbar-action.is-gacha-toggle.is-active { opacity: 1; background: color-mix(in srgb, var(--p-purple-400, var(--aa-ui-node-accent)) 14%, var(--aa-ui-control)); color: color-mix(in srgb, var(--p-purple-400, var(--aa-ui-node-accent)) 78%, var(--aa-ui-text)); }
+.aa-gallery-toolbar-action.is-gacha-toggle.is-active:hover, .aa-gallery-toolbar-action.is-gacha-toggle.is-active:focus-visible { background: color-mix(in srgb, var(--p-purple-400, var(--aa-ui-node-accent)) 20%, var(--aa-ui-control)); }
+.is-gacha-draw { margin-left: 2px; }
 .aa-gallery-toolbar__utilities > .aa-ui-button { border-radius: 8px; opacity: .78; }
 .aa-gallery-toolbar__utilities > .aa-ui-button:hover, .aa-gallery-toolbar__utilities > .aa-ui-button:focus-visible, .aa-gallery-toolbar__utilities > .aa-ui-button.is-open { opacity: 1; background: color-mix(in srgb, var(--aa-ui-node-accent) 9%, var(--aa-ui-control)); color: var(--aa-ui-text); transform: translateY(-1px); }
 .aa-gallery-toolbar-text-action.aa-ui-button { min-height: 26px; gap: 5px; padding: 4px 8px; font-size: 10px; font-weight: 620; }
