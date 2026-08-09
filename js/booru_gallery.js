@@ -252,7 +252,7 @@ async function copyImageToClipboard(src) {
 		await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
 	} finally { bitmap.close(); }
 }
-function searchQuery(state) { return state.query.trim(); }
+function searchQuery(state) { return state.query.trim().replace(/,/g, " ").replace(/\s{2,}/g, " "); }
 function tagLines(value) { return [...new Set(String(value || "").split(/\n/).map((tag) => tag.trim()).filter(Boolean))]; }
 
 function selectionContainsTag(selection, tag) {
