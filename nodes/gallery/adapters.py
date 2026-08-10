@@ -322,10 +322,30 @@ class DanbooruAdapter(BooruAdapter):
 
     async def search(self, session, query, ratings, sort, cursor, limit, credentials, blacklist=()):
         page = max(1, _int(cursor) or 1)
-        tags = _with_blacklist(query, blacklist)
-        if ratings:
+        # Danbooru counts all tokens (tags + negative exclusions + metatags) toward
+        # max_search_tags (2 for anonymous).  Drop metatags if the base query already
+        # fills the budget; remaining blacklist items are enforced locally by
+        # _is_blacklisted.  Rating filtering is still applied locally on results.
+        existing_tag_count = len(query.strip().split()) if query.strip() else 0
+        max_tags = self.capabilities.max_search_tags or 0
+        use_order = bool(sort and sort != "latest")
+        use_rating = bool(ratings)
+        # Drop metatags when they would push the total past the limit.
+        # Prefer dropping order over rating so rating filters survive longer.
+        if existing_tag_count + (1 if use_order else 0) + (1 if use_rating else 0) > max_tags:
+            use_order = False
+        if existing_tag_count + (1 if use_order else 0) + (1 if use_rating else 0) > max_tags:
+            use_rating = False
+        metatag_count = (1 if use_rating else 0) + (1 if use_order else 0)
+        budget = max(0, max_tags - existing_tag_count - metatag_count)
+        if budget > 0 and blacklist:
+            valid_exclusions = tuple(tag for tag in blacklist if re.fullmatch(r"[^\s:]+", tag) and not tag.startswith("-"))
+            tags = _with_blacklist(query, valid_exclusions[:budget])
+        else:
+            tags = query
+        if use_rating:
             tags = f"{tags} rating:{','.join(ratings)}".strip()
-        if sort and sort != "latest":
+        if use_order:
             tags = f"{tags} order:{sort}".strip()
         size = min(max(1, limit), self.capabilities.max_page_size)
         raw = await self._get_json(session, f"{self.base}/posts.json", params={"tags": tags, "page": page, "limit": size, **self.auth_params(credentials)})
