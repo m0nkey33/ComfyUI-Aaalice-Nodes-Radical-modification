@@ -596,7 +596,7 @@ test("tag inputs opt into Autocomplete-Plus and yield keys while its panel is op
 });
 
 test("gallery injects queue snapshots and cleans all event-driven resources", () => {
-	assert.match(source, /graphToPrompt/); assert.match(source, /galleryPayload\(stateFor\(node\), settings\?\.blacklist, settings\?\.outputFilterTags\)/);
+	assert.match(source, /graphToPrompt/); assert.match(source, /galleryPayload\(stateFor\(node\), settings\?\.blacklist, settings\?\.outputFilterTags, settings\?\.animaMode\)/);
 	assert.match(source, /requestController\?\.abort/); assert.match(source, /controller\.destroy\(\)/); assert.doesNotMatch(source, /setInterval/);
 	assert.doesNotMatch(source, /queue-prompt|QueueButton|promptButton/);
 });

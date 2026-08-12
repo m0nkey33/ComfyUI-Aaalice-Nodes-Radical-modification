@@ -481,7 +481,7 @@ function installPromptHook() {
 		const output = result?.output ?? result;
 		for (const node of allGraphNodes(app.graph)) {
 			if (!isGallery(node)) continue;
-			const payload = JSON.stringify(galleryPayload(stateFor(node), settings?.blacklist, settings?.outputFilterTags));
+			const payload = JSON.stringify(galleryPayload(stateFor(node), settings?.blacklist, settings?.outputFilterTags, settings?.animaMode));
 			for (const promptNode of promptNodesForGraphNode(output, node)) {
 				promptNode.inputs ||= {};
 				promptNode.inputs.gallery_payload = payload;
