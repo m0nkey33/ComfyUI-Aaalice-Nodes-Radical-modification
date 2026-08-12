@@ -28,7 +28,7 @@ export function observeGalleryNodeMode(node, onChange) {
 export function createGallerySurfaceFactory(dependencies) {
 	const {
 		capability, collectionOptions, collectionValue, createGalleryCard, createPageControl,
-		createSearchControl, createSelectedRow, defaultGalleryRatings, getCapabilities,
+		createSearchControl, createSelectedRow, defaultGalleryRatings, getCapabilities, getSettings,
 		hasSourceCredentials, icon, label, openClearSelectionDialog, openFilter,
 		openGalleryErrorDialog, openGallerySettings, openPromptOptions, stateFor, transact,
 	} = dependencies;
@@ -125,7 +125,23 @@ export function createGallerySurfaceFactory(dependencies) {
 		}
 		const browseNavigation = el("div", { className: "aa-gallery-toolbar__navigation", children: [collection, pageControl] });
 		const browseTools = el("div", { className: "aa-gallery-toolbar__tools", children: [filter, prompt] });
-		const pageActions = el("div", { className: "aa-gallery-toolbar__page-actions", attrs: { role: "group", "aria-label": label("toolbarActions", "Browse tools") }, children: [browseNavigation, browseTools] });
+		const gachaToggle = button({ className: "aa-gallery-toolbar-text-action aa-gallery-gacha-toggle", iconName: "shuffle", label: label("gacha.toggle", "Gacha"), title: label("gacha.toggleOff", "Random draw is off"), variant: "ghost", size: "sm", onClick: () => {
+			const enabled = !stateFor(node).gachaEnabled;
+			transact(node, (state) => { state.gachaEnabled = enabled; });
+			syncGachaPresentation(enabled);
+			if (enabled) controller.startAutoLoad(getSettings()?.gachaMaxPosts); else controller.stopAutoLoad();
+		} });
+		gachaToggle.setAttribute("aria-pressed", "false");
+		const gachaDraw = iconButton({ className: "aa-gallery-toolbar-action aa-gallery-gacha-draw", iconName: "shuffle", label: label("gacha.draw", "Draw"), title: label("gacha.drawHint", "Randomly select one post from the current page"), variant: "ghost", onClick: () => controller.drawRandom() });
+		gachaDraw.hidden = true;
+		function syncGachaPresentation(active) {
+			active = Boolean(active); gachaToggle.classList.toggle("is-active", active);
+			gachaDraw.hidden = !active;
+			gachaToggle.setAttribute("aria-pressed", String(active));
+			gachaToggle.title = active ? label("gacha.toggleOn", "Random draw is on \u00b7 Click to disable") : label("gacha.toggleOff", "Random draw is off \u00b7 Click to enable");
+		}
+		const gachaTools = el("div", { className: "aa-gallery-toolbar__tools is-gacha", children: [gachaToggle, gachaDraw] });
+		const pageActions = el("div", { className: "aa-gallery-toolbar__page-actions", attrs: { role: "group", "aria-label": label("toolbarActions", "Browse tools") }, children: [browseNavigation, browseTools, gachaTools] });
 		const selectedSummaryText = el("span", null, "");
 		const selectedSummary = el("div", { className: "aa-gallery-toolbar__selected-summary", attrs: { role: "status" }, children: [icon("statusCheck"), selectedSummaryText] });
 		const searchActions = el("div", { className: "aa-gallery-toolbar__search", children: [searchControl.root, searchControl.toggle] });
@@ -144,7 +160,7 @@ export function createGallerySurfaceFactory(dependencies) {
 		const emptySelected = el("div", { className: "aa-gallery-selected__empty", children: [el("span", { className: "aa-gallery-selected__empty-icon", children: [icon("statusCheck")] }), el("strong", null, label("selected.emptyTitle", "Build your output set")), el("p", null, label("selected.empty", "Select posts from the waterfall to build an ordered output."))] });
 		selected.append(selectedListRoot, emptySelected); document.body.append(selectedDropIndicator);
 		root.append(toolbar, el("main", { className: "aa-gallery-browser", children: [masonry, loading, error, end, continueResults, emptyResults] }), selected);
-		const surface = { root, source, collection, masonry, loading, error, errorLabel, end, endLabel, randomMode, continueResults, emptyResults, tabs, selectionMode, selectedCount, selectedSummary: selectedSummaryText, selectedClear: clear, selectedList: null, selectedListRoot, selectedDropIndicator, emptySelected, mode: stateFor(node).view, pageControl, searchControl, masonryController: null, active: true };
+		const surface = { root, source, collection, masonry, loading, error, errorLabel, end, endLabel, randomMode, continueResults, emptyResults, tabs, selectionMode, selectedCount, selectedSummary: selectedSummaryText, selectedClear: clear, selectedList: null, selectedListRoot, selectedDropIndicator, emptySelected, mode: stateFor(node).view, pageControl, searchControl, masonryController: null, active: true, gachaToggle, gachaDraw };
 		surface.masonryController = mountVirtualMasonry(masonry, { renderItem: (post, index) => createGalleryCard(node, controller, post, index, masonry.classList.contains("is-scrolling")), onNearEnd: () => controller.search(), onVisibleIndexChange: (index) => controller.visibleIndexChanged(index), onVisibleItemsChange: (items) => controller.prefetchVisible(items), minCardWidth: placement === "dashboard" ? 108 : 144, gap: placement === "dashboard" ? 5 : 6, maxColumns: placement === "dashboard" ? 6 : 5 });
 		surface.selectedList = mountVirtualList(selectedListRoot, { rowHeight: 96, gap: 7, overscan: 5, onBeforeRender: () => controller.tooltip.hide(), renderItem: (item, index) => createSelectedRow(node, controller, item, index) });
 		selectedListRoot.addEventListener("scroll", () => { controller.tooltip.hide(); if (controller.selectedDragFrom != null) controller.handleSelectedDragLeave({ currentTarget: selectedListRoot, relatedTarget: null }); }, { passive: true });
@@ -161,7 +177,7 @@ export function createGallerySurfaceFactory(dependencies) {
 		surface.syncState = () => {
 			const state = stateFor(node); root.dataset.source = state.source; source.setValue(state.source); searchControl.sync();
 			if (placement === "dashboard") searchControl.setOpen(state.dashboard.searchOpen, { focus: false, submitChanges: false, notifyChange: false });
-			collection.setOptions(collectionOptions(state.source), collectionValue(state)); pageControl.setPage(state.navigation.page); syncRandomModePresentation(state.randomMode); surface.mode = state.view; root.dataset.mode = state.view; tabs.setValue(state.view); selectionMode.setValue(state.selectionMode); surface.syncNodeMode();
+			collection.setOptions(collectionOptions(state.source), collectionValue(state)); pageControl.setPage(state.navigation.page); syncRandomModePresentation(state.randomMode); syncGachaPresentation(state.gachaEnabled); surface.mode = state.view; root.dataset.mode = state.view; tabs.setValue(state.view); selectionMode.setValue(state.selectionMode); surface.syncNodeMode();
 		};
 		surface.destroy = () => { if (destroyed) return; destroyed = true; clearTimeout(scrollSettleTimer); removeCardMotion?.(); visibility.destroy(); selectedDropIndicator.remove(); surface.masonryController.destroy(); surface.selectedList.destroy(); root.remove(); };
 		surface.syncState();

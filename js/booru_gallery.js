@@ -388,7 +388,7 @@ function openPromptOptions(node, anchor) {
 const createGallerySurface = createGallerySurfaceFactory({
 	capability, collectionOptions, collectionValue, createGalleryCard, createPageControl,
 	createSearchControl, createSelectedRow, defaultGalleryRatings,
-	getCapabilities: () => capabilities, hasSourceCredentials, icon, label,
+	getCapabilities: () => capabilities, getSettings: () => settings, hasSourceCredentials, icon, label,
 	openClearSelectionDialog, openFilter, openGalleryErrorDialog, openGallerySettings,
 	openPromptOptions, stateFor, transact,
 });
@@ -454,6 +454,9 @@ function restoreNode(node) {
 	node._aaGalleryController.syncState();
 	void node._aaGalleryController.search({ reset: true, page: state.navigation.page });
 	node._aaGalleryRuntime.accent?.sync?.();
+	// Restore gacha auto-load state
+	if (state.gachaEnabled) node._aaGalleryController.startAutoLoad(settings?.gachaMaxPosts);
+	else node._aaGalleryController.stopAutoLoad();
 }
 
 function setupNodeSafely(node, options) {
@@ -481,6 +484,18 @@ function installPromptHook() {
 		const output = result?.output ?? result;
 		for (const node of allGraphNodes(app.graph)) {
 			if (!isGallery(node)) continue;
+			// Gacha auto-draw: load posts if needed, then randomly pick before serializing.
+			if (stateFor(node).gachaEnabled && node._aaGalleryController) {
+				try {
+					if (!node._aaGalleryController.hasPosts()) {
+						await node._aaGalleryController.search({ reset: true, page: 1 });
+					}
+					const drawn = await node._aaGalleryController.pickRandomSelection();
+					if (drawn) stateFor(node).selections = [drawn.selection];
+				} catch (error) {
+					console.error("[Aaalice] Gacha auto-draw failed during queue", error);
+				}
+			}
 			const payload = JSON.stringify(galleryPayload(stateFor(node), settings?.blacklist, settings?.outputFilterTags, settings?.animaMode));
 			for (const promptNode of promptNodesForGraphNode(output, node)) {
 				promptNode.inputs ||= {};

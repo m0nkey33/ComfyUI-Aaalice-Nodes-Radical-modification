@@ -22,7 +22,7 @@ export function createGalleryControllerFactory(dependencies) {
 
 	return function buildController(node, surfaces) {
 	if (!(surfaces instanceof Set)) surfaces = new Set(surfaces ? [surfaces] : []);
-	let posts = []; let knownPostKeys = new Set(); let pageSegments = []; let nextCursor = null; let ended = false; let loading = false; let manualContinuation = false; let endMessage = ""; let emptyMessage = ""; let requestController = null; let generation = 0; let automaticRefillPages = 0; let detailDialogGeneration = 0; let destroyed = false; let activeDetailDialog = null; const sessionEdits = new Map();
+	let posts = []; let knownPostKeys = new Set(); let pageSegments = []; let nextCursor = null; let ended = false; let loading = false; let manualContinuation = false; let endMessage = ""; let emptyMessage = ""; let requestController = null; let generation = 0; let automaticRefillPages = 0; let detailDialogGeneration = 0; let destroyed = false; let activeDetailDialog = null; let autoLoadTimer = 0; const sessionEdits = new Map();
 	const views = () => [...surfaces];
 	const eachView = (callback) => surfaces.forEach(callback);
 	const eachElement = (name, callback) => eachView((view) => { if (view[name]) callback(view[name], view); });
@@ -622,6 +622,45 @@ export function createGalleryControllerFactory(dependencies) {
 		const save = button({ label: label("editor.save", "Save local tags"), variant: "primary", onClick: () => { const edited = values(); if (selectedIndex >= 0) transact(node, (state) => { state.selections[selectedIndex].editedTags = edited; }); else sessionEdits.set(key, edited); renderSelected(); dialog.close(); } });
 		dialog = createDialog({ title: label("editor.title", "Edit local tags"), body, footer: el("div", { className: "aa-gallery-dialog-actions", children: [restore, copy, save] }), size: "lg", className: "aa-gallery-tag-editor-dialog", confirmOnEnter: false });
 	};
+	const pickRandomSelection = async () => {
+		if (!posts.length) return null;
+		const index = Math.floor(Math.random() * posts.length);
+		const post = posts[index];
+		const detail = await getDetail(post);
+		const selection = selectionFromDetail(detail, sessionEdits.get(`${post.source}:${post.postId}`));
+		if (!selection) throw new Error(label("error.incomplete", "The post detail is incomplete."));
+		return { post, selection };
+	};
+	const drawRandom = async () => {
+		try {
+			const result = await pickRandomSelection();
+			if (!result) {
+				app.extensionManager.toast.add({ severity: "warning", summary: label("gacha.title", "Random draw"), detail: label("gacha.noPosts", "No posts on the current page. Try loading a page first."), life: 4000 });
+				return;
+			}
+			transact(node, (state) => { state.selections = [result.selection]; });
+			renderSelected();
+			refreshCards();
+			app.extensionManager.toast.add({ severity: "success", summary: label("gacha.title", "Random draw"), detail: label("gacha.drawn", "Randomly selected post #{id}").replace("{id}", result.post.postId), life: 3200 });
+		} catch (error) {
+			console.error("[Aaalice] Random draw failed", error);
+			app.extensionManager.toast.add({ severity: "error", summary: label("gacha.title", "Random draw"), detail: error.message, life: 5000 });
+		}
+	};
+	const startAutoLoad = (maxPosts = 0) => {
+		if (autoLoadTimer) return;
+		const limit = Math.max(0, Number(maxPosts) || 0);
+		const loop = () => {
+			if (destroyed || ended || (limit > 0 && posts.length >= limit)) { stopAutoLoad(); return; }
+			if (loading) { autoLoadTimer = setTimeout(loop, 1000); return; }
+			search().finally(() => {
+				if (!autoLoadTimer) return;
+				autoLoadTimer = setTimeout(loop, 2000);
+			});
+		};
+		autoLoadTimer = setTimeout(loop, 500);
+	};
+	const stopAutoLoad = () => { clearTimeout(autoLoadTimer); autoLoadTimer = 0; };
 	return {
 		tooltip,
 		get selectedDragFrom() { return selectedDragFrom; },
@@ -649,6 +688,11 @@ export function createGalleryControllerFactory(dependencies) {
 		setSelectionMode,
 		showError,
 		getLastError() { return lastError; },
+		drawRandom,
+		pickRandomSelection,
+		hasPosts() { return posts.length > 0; },
+		startAutoLoad,
+		stopAutoLoad,
 		syncState() { eachView((view) => view.syncState()); renderSelected(); },
 		attachSurface(view) {
 			if (destroyed) throw new Error("Cannot attach a Gallery surface after its node was removed");
@@ -666,7 +710,7 @@ export function createGalleryControllerFactory(dependencies) {
 		updateSize(post, width, height) { for (const masonry of masonryControllers()) masonry.updateItemSize(`${post.source}:${post.postId}`, width, height); },
 		destroy() {
 			destroyed = true; generation += 1; detailDialogGeneration += 1;
-			clearTimeout(errorTimer); errorTimer = 0; clearTimeout(pageCommitTimer); pageCommitTimer = 0; clearTimeout(prefetchTimer); prefetchTimer = 0;
+			clearTimeout(errorTimer); errorTimer = 0; clearTimeout(pageCommitTimer); pageCommitTimer = 0; clearTimeout(prefetchTimer); prefetchTimer = 0; stopAutoLoad();
 			requestController?.abort(); activeDetailDialog?.close(); activeDetailDialog = null;
 			endSelectedDrag(); tooltip.destroy();
 			for (const view of views()) {
