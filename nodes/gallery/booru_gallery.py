@@ -39,7 +39,10 @@ class BooruGalleryNode(io.ComfyNode):
     async def execute(cls, gallery_payload: str = "", **_kwargs) -> io.NodeOutput:
         selections, options = parse_gallery_payload(gallery_payload)
         if not selections:
-            return io.NodeOutput([], [])
+            raise RuntimeError(
+                "Gallery snapshot is empty: select at least one post before running. "
+                "The node refuses to emit an empty image list so downstream preview/save nodes get a valid input."
+            )
         model_management.throw_exception_if_processing_interrupted()
         service = get_gallery_service()
 
