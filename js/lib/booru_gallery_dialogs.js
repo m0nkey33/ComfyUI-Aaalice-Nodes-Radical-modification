@@ -5,7 +5,7 @@ export function createGalleryDialogs(dependencies) {
 		searchToggleButton, stateFor, t, transact,
 	} = dependencies;
 
-function createSearchControl(node, { defaultOpen = false } = {}) {
+function createSearchControl(node, { defaultOpen = false, onOpenChange = null } = {}) {
 	const root = el("div", "aa-gallery-search");
 	const input = document.createElement("input"); input.type = "search"; input.className = "aa-gallery-search__input aa-ui-search-input";
 	input.setAttribute("data-autocomplete-plus", "");
@@ -18,14 +18,15 @@ function createSearchControl(node, { defaultOpen = false } = {}) {
 	const submit = () => {
 		transact(node, (state) => { state.query = input.value.trim(); state.filters.feed = "search"; state.filters.period = ""; state.navigation.page = 1; });
 		toggle.setSearchValue(input.value.trim());
-		node._aaGalleryCollection?.setValue(`sort:${stateFor(node).filters.sort}`);
-		node._aaGalleryPage?.setPage(1);
+		node._aaGalleryController?.syncState();
 		node._aaGalleryController?.search({ reset: true, page: 1 });
 	};
-	const setOpen = (next, { focus = true } = {}) => {
+	const setOpen = (next, { focus = true, submitChanges = true, notifyChange = true } = {}) => {
+		const changed = open !== Boolean(next);
 		open = Boolean(next);
-		if (!open && input.value.trim() !== searchQuery(stateFor(node))) submit();
+		if (!open && submitChanges && input.value.trim() !== searchQuery(stateFor(node))) submit();
 		root.classList.toggle("is-open", open); toggle.hidden = open; toggle.setSearchOpen(open);
+		if (changed && notifyChange) onOpenChange?.(open);
 		if (open && focus) queueMicrotask(() => { input.focus({ preventScroll: true }); input.setSelectionRange(input.value.length, input.value.length); });
 	};
 	const addTag = (tag, maxTags = null) => {
@@ -73,8 +74,39 @@ function createSearchControl(node, { defaultOpen = false } = {}) {
 		if (event.key === "Escape") { event.preventDefault(); setOpen(false); }
 		else if (event.key === "Enter" && !composing && !event.isComposing) { event.preventDefault(); submit(); }
 	});
-	setOpen(defaultOpen, { focus: false });
+	setOpen(defaultOpen, { focus: false, notifyChange: false });
 	return { root, input, toggle, setOpen, addTag, sync: () => { if (document.activeElement !== input) input.value = stateFor(node).query; toggle.setSearchValue(input.value); } };
+}
+
+function openGalleryErrorDialog(error, onRetry) {
+	const message = String(error?.message || error?.summary || error || "");
+	const isCertificateError = error?.code === "tls_certificate_error";
+	const guidance = isCertificateError
+		? label("error.tlsCertificate", "SSL certificate verification failed. Check the system clock, HTTPS proxy or packet-inspection certificate, and trusted root certificates. Gallery will not disable certificate verification.")
+		: "";
+	let dialog;
+	const close = button({ label: t("aaalice.common.close", "Close"), variant: "ghost", onClick: () => dialog.close() });
+	const copy = button({ label: label("error.copy", "Copy error"), iconName: "copy", variant: "secondary", onClick: async () => {
+		try {
+			await navigator.clipboard.writeText(message);
+			app.extensionManager.toast.add({ severity: "success", summary: label("error.dialogTitle", "Gallery error details"), detail: label("error.copied", "Complete error copied to clipboard."), life: 3200 });
+		} catch (copyError) {
+			app.extensionManager.toast.add({ severity: "error", summary: label("error.dialogTitle", "Gallery error details"), detail: copyError.message, life: 5000 });
+		}
+	} });
+	const retry = button({ label: label("error.retry", "Retry"), iconName: "refresh", variant: "primary", onClick: () => { dialog.close(); onRetry?.(); } });
+	const body = el("div", { className: "aa-gallery-error-details", attrs: { "data-code": error?.code || "generic" }, children: [
+		...(guidance ? [el("div", { className: "aa-gallery-error-details__notice", children: [icon("statusWarning"), el("p", null, guidance)] })] : []),
+		el("pre", { className: "aa-gallery-error-details__raw", attrs: { tabindex: "0", "aria-label": label("error.complete", "Complete error") }, text: message }),
+	] });
+	dialog = createDialog({
+		title: label("error.dialogTitle", "Gallery error details"),
+		body,
+		footer: el("div", { className: "aa-gallery-dialog-actions", children: [close, copy, retry] }),
+		size: "sm",
+		className: "aa-gallery-error-dialog",
+		confirmOnEnter: false,
+	});
 }
 
 function openInterrogateResultDialog(detail, text) {
@@ -138,5 +170,5 @@ function openSingleSelectionDialog(onConfirm) {
 }
 
 
-	return { createSearchControl, openClearSelectionDialog, openInterrogateResultDialog, openSingleSelectionDialog };
+	return { createSearchControl, openClearSelectionDialog, openGalleryErrorDialog, openInterrogateResultDialog, openSingleSelectionDialog };
 }

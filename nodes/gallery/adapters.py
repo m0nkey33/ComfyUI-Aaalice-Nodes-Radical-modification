@@ -24,6 +24,12 @@ class GalleryUpstreamTimeoutError(RuntimeError):
     code = "upstream_timeout"
 
 
+class GalleryTLSCertificateError(RuntimeError):
+    """TLS peer verification failed and must not be bypassed or retried."""
+
+    code = "tls_certificate_error"
+
+
 def _is_upstream_query_timeout(status: int, body: str) -> bool:
     # Danbooru cancels oversized result sets (e.g. order:score over millions of
     # posts) with ActiveRecord::QueryCanceled; retrying cannot help.
@@ -128,6 +134,7 @@ class GalleryPage:
     ended: bool
     warnings: tuple[str, ...] = ()
     page: int = 1
+    total: int | None = None
 
     def json(self) -> dict[str, Any]:
         return {"posts": [post.json() for post in self.posts], "nextCursor": self.next_cursor,
@@ -167,6 +174,8 @@ class BooruAdapter:
                             return await response.json(content_type=None)
                         except Exception as exc:
                             raise RuntimeError(f"{self.source} GET {response_url} returned invalid JSON") from exc
+                except aiohttp.ClientConnectorCertificateError as exc:
+                    raise GalleryTLSCertificateError(f"{self.source} TLS certificate verification failed for {url}: {exc}") from exc
                 except (aiohttp.ClientError, TimeoutError) as exc:
                     if attempt >= 2:
                         raise RuntimeError(f"{self.source} GET {url} failed after {attempt + 1} attempts: {exc}") from exc
@@ -298,7 +307,7 @@ def rating_matches(source: str, value: str, ratings: list[str]) -> bool:
 class DanbooruAdapter(BooruAdapter):
     source = "danbooru"
     capabilities = GalleryCapabilities(source, "Danbooru", ("general", "sensitive", "questionable", "explicit"),
-                                       ("latest", "score", "favcount", "random"), "page", 200,
+                                       ("latest", "score", "favcount"), "page", 200,
                                        ("username", "apiKey"), True, True, True, ("day", "week", "month"),
                                        tag_search=True, max_search_tags=2,
                                        credentials_url="https://danbooru.donmai.us/settings")
@@ -320,13 +329,14 @@ class DanbooruAdapter(BooruAdapter):
 
     async def search(self, session, query, ratings, sort, cursor, limit, credentials, blacklist=()):
         page = max(1, _int(cursor) or 1)
+        size = min(max(1, limit), self.capabilities.max_page_size)
         # Danbooru counts all tokens (tags + metatags) toward max_search_tags
         # (2 for anonymous).  Drop metatags when the base query already fills
         # the budget, otherwise the API returns HTTP 422.  Blacklist and rating
         # filters are enforced locally on the results below.
         existing_tag_count = len(query.strip().split()) if query.strip() else 0
         max_tags = self.capabilities.max_search_tags or 0
-        use_order = bool(sort and sort != "latest")
+        use_order = bool(sort and sort not in ("latest", "random"))
         use_rating = bool(ratings)
         # Drop metatags when they would push the total past the limit.
         # Prefer dropping order over rating so rating filters survive longer.
@@ -337,9 +347,10 @@ class DanbooruAdapter(BooruAdapter):
         tags = query.strip()
         if use_rating:
             tags = f"{tags} rating:{','.join(ratings)}".strip()
-        if use_order:
+        if sort == "random":
+            tags = f"{tags} random:{size}".strip()
+        elif use_order:
             tags = f"{tags} order:{sort}".strip()
-        size = min(max(1, limit), self.capabilities.max_page_size)
         raw = await self._get_json(session, f"{self.base}/posts.json", params={"tags": tags, "page": page, "limit": size, **self.auth_params(credentials)})
         if not isinstance(raw, list):
             raise RuntimeError("danbooru search response must be a list")
@@ -490,6 +501,8 @@ class GelbooruAdapter(BooruAdapter):
             tags = f"{tags} rating:{ratings[0]}".strip()
         if sort == "score":
             tags = f"{tags} sort:score:desc".strip()
+        elif sort == "random":
+            tags = f"{tags} sort:random".strip()
         size = min(max(1, limit), 100)
         raw = await self._posts(session, {"tags": tags, "pid": pid, "limit": size}, credentials)
         blocked = _normalize_blacklist(blacklist)
@@ -721,7 +734,7 @@ class AITagAdapter(BooruAdapter):
         warnings = ("AI TAG does not expose rating or categorized tag metadata.",)
         if len(visible) < len(items):
             warnings += ("local-blacklist-filtered",)
-        return GalleryPage(posts, None if ended else str(page + 1), ended, warnings, page)
+        return GalleryPage(posts, None if ended else str(page + 1), ended, warnings, page, total)
 
     async def ranking(self, session, period, cursor, limit, credentials, blacklist=()):
         if period != "month":
@@ -740,7 +753,7 @@ class AITagAdapter(BooruAdapter):
         warnings = ("AI TAG does not expose rating or categorized tag metadata.",)
         if len(visible) < len(items):
             warnings += ("local-blacklist-filtered",)
-        return GalleryPage(posts, None if ended else str(page + 1), ended, warnings, page)
+        return GalleryPage(posts, None if ended else str(page + 1), ended, warnings, page, total)
 
     async def get_post(self, session, post_id, credentials):
         raw = await self._get_json(session, f"{self.base}/api/work/{post_id}")

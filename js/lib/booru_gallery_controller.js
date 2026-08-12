@@ -1,4 +1,7 @@
 /** Stateful browse/selection controller for one mounted Booru Gallery node. */
+import { createGalleryHover } from "./booru_gallery_hover.js";
+import { createRandomGallerySession, RANDOM_UNIQUE_MISS_LIMIT } from "./booru_gallery_random.js";
+
 export function filteredPageRefillAction(warnings, ended, needsMore, automaticPages, maximumAutomaticPages) {
 	if (ended || !needsMore || !warnings?.includes("local-blacklist-filtered")) return "none";
 	return automaticPages < maximumAutomaticPages ? "automatic" : "manual";
@@ -17,8 +20,14 @@ export function createGalleryControllerFactory(dependencies) {
 		streamTagTranslations, tagCount, transact, promptAssistantApi,
 	} = dependencies;
 
-return function buildController(node, elements) {
-	let posts = []; let knownPostKeys = new Set(); let pageSegments = []; let nextCursor = null; let ended = false; let loading = false; let requestController = null; let generation = 0; let automaticRefillPages = 0; let detailDialogGeneration = 0; let destroyed = false; let activeDetailDialog = null; const sessionEdits = new Map();
+	return function buildController(node, surfaces) {
+	if (!(surfaces instanceof Set)) surfaces = new Set(surfaces ? [surfaces] : []);
+	let posts = []; let knownPostKeys = new Set(); let pageSegments = []; let nextCursor = null; let ended = false; let loading = false; let manualContinuation = false; let endMessage = ""; let emptyMessage = ""; let requestController = null; let generation = 0; let automaticRefillPages = 0; let detailDialogGeneration = 0; let destroyed = false; let activeDetailDialog = null; const sessionEdits = new Map();
+	const views = () => [...surfaces];
+	const eachView = (callback) => surfaces.forEach(callback);
+	const eachElement = (name, callback) => eachView((view) => { if (view[name]) callback(view[name], view); });
+	const masonryControllers = () => views().map((view) => view.masonryController).filter(Boolean);
+	const randomSession = createRandomGallerySession(); let randomMisses = 0;
 	const MAX_AUTOMATIC_REFILL_PAGES = 4;
 	const detailCache = new Map(); const previewCache = new Map(); let previewGeneration = 0; let previewPrefetchActive = 0; const previewPrefetchQueue = []; const previewPrefetchPending = new Set(); const prefetchedPreviewSources = new Map();
 	const touchCache = (cache, key, value) => { cache.delete(key); cache.set(key, value); return value; };
@@ -47,70 +56,81 @@ return function buildController(node, elements) {
 	let pageCommitTimer = 0;
 	let selectedDragFrom = null;
 	let selectedDropInsertBefore = null;
-	let hoverTranslationAbort = null;
-	const tooltip = createTooltip({ delay: 0, closeDelay: 120 });
-	const hideTooltip = tooltip.hide;
-	tooltip.hide = () => { hoverTranslationAbort?.abort(); hoverTranslationAbort = null; hideTooltip(); };
-	tooltip.destroy = tooltip.hide;
-	let errorTimer = 0;
+	let errorTimer = 0; let lastError = null;
 	const showError = (error) => {
-		// 已知上游失败签名映射为可操作提示；原始信息保留在 console。
-		const text = error?.code === "upstream_timeout"
+		const code = error?.code || "";
+		const message = error?.message || String(error);
+		const summary = code === "upstream_timeout"
 			? label("error.upstreamTimeout", "The site took too long to sort this many results. Add more tags or filters to narrow the search.")
-			: error?.message || String(error);
-		elements.errorLabel.textContent = text; elements.error.hidden = false; console.error("[Aaalice] Booru Gallery", error);
-		// 位置随场景：页面没有任何图像卡片（首次加载、凭证缺失等）时错误横幅
-		// 放在顶部避免被误认为状态条；瀑布流已有内容时保持底部，少遮挡结果。
-		elements.error.classList.toggle("is-top", !posts.length);
+			: code === "tls_certificate_error"
+				? label("error.tlsCertificateSummary", "SSL certificate verification failed. Click to view the complete error and troubleshooting steps.")
+				: message;
+		lastError = { code, message, summary };
+		eachView((view) => {
+			view.errorLabel.textContent = summary;
+			view.error.hidden = false;
+			view.error.title = code === "credentials_required" ? label("settings.open", "Configure Gallery…") : label("error.detailsHint", "Open complete error details");
+			// 页面没有图像时错误放在顶部，避免被误认为伴随内容的状态条。
+			view.error.classList.toggle("is-top", !posts.length);
+		});
+		console.error("[Aaalice] Booru Gallery", error);
 		clearTimeout(errorTimer);
-		// 凭证缺失属于持续状态：横幅保持到配置完成或下一次成功刷新，不自动消失。
-		if (error?.code === "credentials_required") { errorTimer = 0; return; }
-		errorTimer = setTimeout(() => { elements.error.hidden = true; }, 6000);
+		// 凭证和 TLS 校验失败都需要用户处理，持续显示到用户重试或配置更新。
+		if (code === "credentials_required" || code === "tls_certificate_error") { errorTimer = 0; return; }
+		errorTimer = setTimeout(clearError, 6000);
 	};
-	const clearError = () => { clearTimeout(errorTimer); errorTimer = 0; elements.error.hidden = true; elements.errorLabel.textContent = ""; };
-	const setLoading = (value) => { loading = value; elements.loading.hidden = !value; elements.pageControl?.setBusy?.(value); };
+	const clearError = () => {
+		clearTimeout(errorTimer); errorTimer = 0; lastError = null;
+		eachView((view) => { view.error.hidden = true; view.error.title = ""; view.errorLabel.textContent = ""; });
+	};
+	const setLoading = (value) => {
+		loading = value;
+		eachView((view) => { view.loading.hidden = !value; view.pageControl?.setBusy?.(value); if (view.randomMode) view.randomMode.disabled = value; });
+	};
 	const addTagToSearch = (tag) => {
 		const source = stateFor(node).source;
 		const cap = capability(source);
 		if (!cap?.tagSearch) return false;
 		const maxTags = source === "danbooru" && hasSourceCredentials(source) ? null : cap.maxSearchTags;
-		return elements.searchControl.addTag(tag, maxTags);
+		const view = views().find((item) => item.root.isConnected) || views()[0];
+		return view?.searchControl.addTag(tag, maxTags) || false;
 	};
-	const refreshCards = () => elements.masonry.querySelectorAll(".aa-gallery-card").forEach((card) => card._aaGalleryUpdate?.());
+	const refreshCards = () => eachElement("masonry", (masonry) => masonry.querySelectorAll(".aa-gallery-card").forEach((card) => card._aaGalleryUpdate?.()));
+	const viewForElement = (element) => views().find((view) => view.root.contains(element));
+	let selectedDragView = null;
 	const hideSelectedDropIndicator = () => {
 		selectedDropInsertBefore = null;
-		const indicator = elements.selectedDropIndicator;
-		if (!indicator) return;
-		indicator.hidden = true;
-		indicator.classList.remove("is-visible");
-		indicator.style.removeProperty("left");
-		indicator.style.removeProperty("width");
-		indicator.style.removeProperty("top");
+		eachView((view) => {
+			const indicator = view.selectedDropIndicator;
+			if (!indicator) return;
+			indicator.hidden = true;
+			indicator.classList.remove("is-visible");
+			indicator.style.removeProperty("left");
+			indicator.style.removeProperty("width");
+			indicator.style.removeProperty("top");
+		});
 	};
-	const clearSelectedDragClasses = () => {
-		elements.selectedListRoot?.querySelectorAll(".aa-gallery-selected-row.is-dragging, .aa-gallery-selected-row.is-drop-before, .aa-gallery-selected-row.is-drop-after")
-			.forEach((row) => row.classList.remove("is-dragging", "is-drop-before", "is-drop-after"));
-	};
+	const clearSelectedDragClasses = () => eachElement("selectedListRoot", (list) => list.querySelectorAll(".aa-gallery-selected-row.is-dragging, .aa-gallery-selected-row.is-drop-before, .aa-gallery-selected-row.is-drop-after")
+		.forEach((row) => row.classList.remove("is-dragging", "is-drop-before", "is-drop-after")));
 	const endSelectedDrag = () => {
 		selectedDragFrom = null;
+		selectedDragView = null;
 		hideSelectedDropIndicator();
 		clearSelectedDragClasses();
-		elements.selectedListRoot?.classList.remove("is-reordering");
+		eachElement("selectedListRoot", (list) => list.classList.remove("is-reordering"));
 	};
 	const beginSelectedDrag = (index, row) => {
 		selectedDragFrom = index;
+		selectedDragView = viewForElement(row);
 		selectedDropInsertBefore = null;
-		elements.selectedListRoot?.classList.add("is-reordering");
+		selectedDragView?.selectedListRoot.classList.add("is-reordering");
 		clearSelectedDragClasses();
 		row?.classList.add("is-dragging");
 		hideSelectedDropIndicator();
 	};
-	const showSelectedDropIndicator = (target) => {
-		const indicator = elements.selectedDropIndicator;
-		if (!indicator || !target?.row) {
-			hideSelectedDropIndicator();
-			return;
-		}
+	const showSelectedDropIndicator = (target, view) => {
+		const indicator = view?.selectedDropIndicator;
+		if (!indicator || !target?.row) { hideSelectedDropIndicator(); return; }
 		const rect = target.row.getBoundingClientRect();
 		const y = target.before ? rect.top : rect.bottom;
 		indicator.hidden = false;
@@ -118,36 +138,35 @@ return function buildController(node, elements) {
 		indicator.style.left = `${Math.round(rect.left + 10)}px`;
 		indicator.style.width = `${Math.max(48, Math.round(rect.width - 20))}px`;
 		indicator.style.top = `${Math.round(y - 1.5)}px`;
-		elements.selectedListRoot?.querySelectorAll(".aa-gallery-selected-row.is-drop-before, .aa-gallery-selected-row.is-drop-after")
+		view.selectedListRoot.querySelectorAll(".aa-gallery-selected-row.is-drop-before, .aa-gallery-selected-row.is-drop-after")
 			.forEach((row) => row.classList.remove("is-drop-before", "is-drop-after"));
 		target.row.classList.toggle("is-drop-before", target.before);
 		target.row.classList.toggle("is-drop-after", !target.before);
 	};
+	const selectedDragList = (event) => event.currentTarget || selectedDragView?.selectedListRoot;
 	const handleSelectedDragOver = (event) => {
-		if (selectedDragFrom == null || !elements.selectedListRoot) return;
+		const list = selectedDragList(event); const view = viewForElement(list);
+		if (selectedDragFrom == null || !list) return;
 		event.preventDefault();
 		event.dataTransfer.dropEffect = "move";
-		const target = resolveSelectedDropTarget(elements.selectedListRoot, event.clientY);
-		if (!target) {
-			hideSelectedDropIndicator();
-			return;
-		}
+		const target = resolveSelectedDropTarget(list, event.clientY);
+		if (!target) { hideSelectedDropIndicator(); return; }
 		const dest = moveSelectionIndex(selectedDragFrom, target.insertBefore);
 		selectedDropInsertBefore = dest == null ? null : target.insertBefore;
 		if (dest == null) {
 			hideSelectedDropIndicator();
-			elements.selectedListRoot.querySelectorAll(".aa-gallery-selected-row.is-drop-before, .aa-gallery-selected-row.is-drop-after")
-				.forEach((row) => row.classList.remove("is-drop-before", "is-drop-after"));
+			list.querySelectorAll(".aa-gallery-selected-row.is-drop-before, .aa-gallery-selected-row.is-drop-after").forEach((row) => row.classList.remove("is-drop-before", "is-drop-after"));
 			return;
 		}
-		showSelectedDropIndicator(target);
+		showSelectedDropIndicator(target, view);
 	};
 	const handleSelectedDrop = (event) => {
-		if (selectedDragFrom == null || !elements.selectedListRoot) return;
+		const list = selectedDragList(event);
+		if (selectedDragFrom == null || !list) return;
 		event.preventDefault();
 		const rawFrom = event.dataTransfer.getData("text/x-aa-gallery-index") || event.dataTransfer.getData("text/plain");
 		const from = Number.isInteger(selectedDragFrom) ? selectedDragFrom : Number(rawFrom);
-		const target = resolveSelectedDropTarget(elements.selectedListRoot, event.clientY);
+		const target = resolveSelectedDropTarget(list, event.clientY);
 		const insertBefore = target?.insertBefore ?? selectedDropInsertBefore;
 		const dest = moveSelectionIndex(from, insertBefore);
 		endSelectedDrag();
@@ -161,44 +180,43 @@ return function buildController(node, elements) {
 		refreshCards();
 	};
 	const handleSelectedDragLeave = (event) => {
-		if (!elements.selectedListRoot || selectedDragFrom == null) return;
-		if (elements.selectedListRoot.contains(event.relatedTarget)) return;
+		const list = selectedDragList(event);
+		if (!list || selectedDragFrom == null || list.contains(event.relatedTarget)) return;
 		hideSelectedDropIndicator();
-		elements.selectedListRoot.querySelectorAll(".aa-gallery-selected-row.is-drop-before, .aa-gallery-selected-row.is-drop-after")
-			.forEach((row) => row.classList.remove("is-drop-before", "is-drop-after"));
+		list.querySelectorAll(".aa-gallery-selected-row.is-drop-before, .aa-gallery-selected-row.is-drop-after").forEach((row) => row.classList.remove("is-drop-before", "is-drop-after"));
 	};
 	const renderSelected = () => {
 		tooltip.hide();
 		if (selectedDragFrom == null) endSelectedDrag();
 		const state = stateFor(node); const count = state.selections.length;
-		elements.selectedList.setItems(state.selections, { preserveScroll: true });
-		elements.tabs.setValue(elements.mode);
-		elements.selectionMode.setValue(state.selectionMode);
-		if (elements.selectedCount) {
-			elements.selectedCount.textContent = String(count);
-			elements.selectedCount.setAttribute("aria-label", label("selected.outputHint", "{count} outputs").replace("{count}", String(count)));
-		}
-		if (elements.selectedSummary) elements.selectedSummary.textContent = label("selected.summary", "{count} images · output in this order").replace("{count}", String(count));
-		if (elements.selectedClear) elements.selectedClear.disabled = count === 0;
-		elements.emptySelected.hidden = count > 0;
+		eachView((view) => {
+			view.selectedList.setItems(state.selections, { preserveScroll: true });
+			view.tabs.setValue(view.mode);
+			view.selectionMode.setValue(state.selectionMode);
+			if (view.selectedCount) {
+				view.selectedCount.textContent = String(count);
+				view.selectedCount.setAttribute("aria-label", label("selected.outputHint", "{count} outputs").replace("{count}", String(count)));
+			}
+			if (view.selectedSummary) view.selectedSummary.textContent = label("selected.summary", "{count} images · output in this order").replace("{count}", String(count));
+			if (view.selectedClear) view.selectedClear.disabled = count === 0;
+			view.emptySelected.hidden = count > 0;
+		});
 	};
 	const setMode = (mode, { persist = true } = {}) => {
 		mode = mode === "selected" ? "selected" : "browse";
-		if (elements.mode === mode) return;
+		if (persist && stateFor(node).view === mode) return;
 		tooltip.hide();
 		endSelectedDrag();
-		elements.mode = mode;
-		elements.root.dataset.mode = mode;
 		if (persist) transact(node, (state) => { state.view = mode; });
+		eachView((view) => { view.mode = mode; view.root.dataset.mode = mode; });
 		renderSelected();
 	};
 	const setSelectionMode = (mode, { persist = true } = {}) => {
 		mode = mode === "single" ? "single" : "multi";
 		const current = stateFor(node).selectionMode;
-		if (!persist) { elements.selectionMode.setValue(current); return; }
-		if (current === mode) { elements.selectionMode.setValue(current); return; }
+		if (!persist || current === mode) { eachElement("selectionMode", (control) => control.setValue(current)); return; }
 		if (mode === "single" && stateFor(node).selections.length > 1) {
-			elements.selectionMode.setValue(current);
+			eachElement("selectionMode", (control) => control.setValue(current));
 			openSingleSelectionDialog(() => {
 				transact(node, (state) => { state.selectionMode = "single"; state.selections = state.selections.slice(0, 1); });
 				renderSelected();
@@ -214,20 +232,28 @@ return function buildController(node, elements) {
 		const state = stateFor(node); if (state.navigation.page === value) return;
 		// 页码立即写入内存并投影到 DOM；图 dirty 信号合并到滚动停止后，避免
 		// 快速滚动跨页时 graph.change() 强制整张画布前景+背景全量重绘。
-		state.navigation.page = value; elements.pageControl?.setPage(value);
+		state.navigation.page = value; eachElement("pageControl", (control) => control.setPage(value));
 		clearTimeout(pageCommitTimer);
 		pageCommitTimer = setTimeout(() => { pageCommitTimer = 0; node.graph?.change?.(); }, 250);
 	};
 	const search = async ({ reset = false, page = null, automaticRefill = false } = {}) => {
-		if ((!reset && (loading || !elements.continueResults.hidden)) || (ended && !reset)) return;
-		if (!automaticRefill) { automaticRefillPages = 0; elements.continueResults.hidden = true; }
-		const requestedPage = reset ? Math.max(1, Math.floor(Number(page ?? stateFor(node).navigation.page) || 1)) : null;
+		if ((!reset && (loading || manualContinuation)) || (ended && !reset)) return;
+		if (!automaticRefill) { automaticRefillPages = 0; manualContinuation = false; eachElement("continueResults", (element) => { element.hidden = true; }); }
+		const state = stateFor(node); const randomMode = Boolean(state.randomMode);
+		const randomScope = JSON.stringify([state.source, state.filters.feed, state.filters.period, searchQuery(state), state.filters.ratings]);
+		randomSession.sync(randomMode, randomScope);
+		const requestedPage = reset && !randomMode ? Math.max(1, Math.floor(Number(page ?? state.navigation.page) || 1)) : null;
 		// Mark the request active before clearing the masonry. setItems() draws synchronously
 		// and may report near-end; that callback must not start a competing first-page request.
 		setLoading(true);
-		if (reset) { requestController?.abort(); requestController = new AbortController(); generation += 1; rotatePreviewCache(); posts = []; knownPostKeys = new Set(); pageSegments = []; nextCursor = null; ended = false; elements.masonryController.setItems([], { preserveScroll: false }); elements.end.hidden = true; elements.emptyResults.hidden = true; clearError(); rememberPage(requestedPage); }
+		if (reset) {
+			requestController?.abort(); requestController = new AbortController(); generation += 1; rotatePreviewCache(); posts = []; knownPostKeys = new Set(); pageSegments = []; nextCursor = null; ended = false; randomMisses = 0;
+			for (const masonry of masonryControllers()) masonry.setItems([], { preserveScroll: false });
+			eachElement("end", (element) => { element.hidden = true; }); eachElement("emptyResults", (element) => { element.hidden = true; });
+			clearError(); if (!randomMode) rememberPage(requestedPage);
+		}
 		else requestController ||= new AbortController();
-		const currentGeneration = generation; const state = stateFor(node);
+		const currentGeneration = generation;
 		const favoritesFeed = state.filters.feed === "favorites";
 		const cap = capability(state.source);
 		const needsCredentials = (cap?.authRequired || (favoritesFeed && cap?.favoriteRead)) && !hasSourceCredentials(state.source);
@@ -238,39 +264,53 @@ return function buildController(node, elements) {
 			setLoading(false);
 			return;
 		}
-		let continueAutomatically = false;
+		let continueAutomatically = false; let pageLoaded = false;
 		try {
 			const favorites = state.filters.feed === "favorites";
 			const params = new URLSearchParams({ source: state.source, limit: "60" });
 			if (!favorites) { params.set("query", searchQuery(state)); params.set("sort", state.filters.sort); for (const rating of state.filters.ratings) params.append("rating", rating); }
-			if (requestedPage != null) params.set("page", String(requestedPage)); else if (nextCursor) params.set("cursor", nextCursor);
+			if (randomMode) params.set("random", "1");
+			else if (requestedPage != null) params.set("page", String(requestedPage));
+			else if (nextCursor) params.set("cursor", nextCursor);
 			const endpoint = favorites ? "favorites" : state.filters.feed === "ranking" ? "ranking" : "search";
 			if (state.filters.feed === "ranking") { params.delete("query"); params.delete("sort"); params.set("period", state.filters.period); }
-			const resultPage = await jsonRequest(`${API}/${endpoint}?${params}`, { signal: requestController.signal });
+			const resultPage = await jsonRequest(`${API}/${endpoint}?${params}`, { signal: requestController.signal, ...(randomMode ? { cache: "no-store" } : {}) });
 			if (currentGeneration !== generation || requestController.signal.aborted) return;
-			const additions = (resultPage.posts || []).filter((post) => {
-				if (!post.previewUrl?.startsWith("https://")) return false;
+			const candidates = (resultPage.posts || []).filter((post) => post.previewUrl?.startsWith("https://"));
+			const additions = (randomMode ? randomSession.take(candidates) : candidates).filter((post) => {
 				const key = `${post.source}:${post.postId}`; if (knownPostKeys.has(key)) return false; knownPostKeys.add(key); return true;
 			});
-			const start = posts.length; posts.push(...additions); pageSegments.push({ page: Math.max(1, Number(resultPage.page) || requestedPage || pageSegments.at(-1)?.page + 1 || 1), start, end: posts.length }); elements.masonryController.append(additions);
-			nextCursor = resultPage.nextCursor || null; ended = Boolean(resultPage.ended || !nextCursor);
+			const start = posts.length; posts.push(...additions);
+			if (!randomMode) pageSegments.push({ page: Math.max(1, Number(resultPage.page) || requestedPage || pageSegments.at(-1)?.page + 1 || 1), start, end: posts.length });
+			for (const masonry of masonryControllers()) masonry.append(additions);
+			if (randomMode) { randomMisses = additions.length ? 0 : randomMisses + 1; nextCursor = randomMisses < RANDOM_UNIQUE_MISS_LIMIT ? "random" : null; ended = !nextCursor; }
+			else { nextCursor = resultPage.nextCursor || null; ended = Boolean(resultPage.ended || !nextCursor); }
 			const noResults = ended && !posts.length;
-			elements.end.hidden = !ended || noResults; elements.emptyResults.hidden = !noResults;
+			endMessage = randomMode ? label("random.exhausted", "No new images were found after several draws") : label("end", "End of results");
 			if (noResults) {
 				const anonymousHidden = (resultPage.warnings || []).includes("restricted-media-hidden");
-				elements.emptyResults.querySelector("span").textContent = anonymousHidden
+				emptyMessage = anonymousHidden
 					? label("warning.restrictedMediaHidden", "Danbooru hides loli/shota posts from member and anonymous accounts; only Builder-level and above can view them.")
+					: randomMode ? label("random.empty", "No unseen images were found. Try changing the search or rating filters.")
 					: label("emptyResults", "No posts match this search. Try widening the rating filter or reducing blocked tags.");
 			}
-			const refillAction = filteredPageRefillAction(resultPage.warnings, ended, elements.masonryController.needsMore(), automaticRefillPages, MAX_AUTOMATIC_REFILL_PAGES);
+			eachView((view) => {
+				view.endLabel.textContent = endMessage;
+				view.end.hidden = !ended || noResults; view.emptyResults.hidden = !noResults;
+				if (noResults) view.emptyResults.querySelector("span").textContent = emptyMessage;
+			});
+			const refillAction = randomMode ? "none" : filteredPageRefillAction(resultPage.warnings, ended, masonryControllers().some((masonry) => masonry.needsMore()), automaticRefillPages, MAX_AUTOMATIC_REFILL_PAGES);
 			if (refillAction === "automatic") { automaticRefillPages += 1; continueAutomatically = true; }
-			elements.continueResults.hidden = refillAction !== "manual";
-			clearError();
+			manualContinuation = !randomMode && refillAction === "manual";
+			eachElement("continueResults", (element) => { element.hidden = !manualContinuation; });
+			clearError(); pageLoaded = true;
 		} catch (error) { if (error.name !== "AbortError") showError(error); }
 		finally {
 			if (currentGeneration !== generation) return;
 			setLoading(false);
+			// append() 会同步上报 near-end；游标状态落定后重放被 loading guard 吃掉的信号。
 			if (continueAutomatically && !destroyed) void search({ automaticRefill: true });
+			else if (pageLoaded && !ended && !manualContinuation && !destroyed) for (const masonry of masonryControllers()) masonry.recheckNearEnd();
 		}
 	};
 	const visibleIndexChanged = (index) => {
@@ -412,124 +452,10 @@ return function buildController(node, elements) {
 			if (control) control.disabled = false;
 		}
 	};
-	const showHover = (anchor, post) => {
-		hoverTranslationAbort?.abort();
-		hoverTranslationAbort = new AbortController();
-		const translationAbort = hoverTranslationAbort;
-		const previewSrc = proxyUrl(post.source, post.previewUrl);
-		const searchSample = post.sampleUrl && post.sampleUrl !== post.previewUrl ? post.sampleUrl : null;
-		const searchSampleSrc = searchSample ? proxyUrl(post.source, searchSample) : null;
-		const readySampleSrc = searchSampleSrc && previewCache.get(searchSampleSrc)?.ready ? searchSampleSrc : null;
-		const base = el("img", { attrs: { src: readySampleSrc || previewSrc, alt: "", decoding: "async" } });
-		const upgrade = el("img", { className: "is-upgrade", attrs: { alt: "", decoding: "async", hidden: true } });
-		const loading = el("span", { className: "aa-gallery-hover__loading", attrs: { role: "status", "aria-label": label("hover.loading", "Loading larger preview…") }, children: [icon("loading")] });
-		let lockedHeight = null;
-		const applyHoverImageSize = (item) => {
-			const width = Number(item?.width); const height = Number(item?.height);
-			const next = width > 0 && height > 0 ? Math.max(150, Math.min(360, Math.round(320 * height / width))) : 320;
-			if (lockedHeight != null && Math.abs(lockedHeight - next) <= 2) return;
-			lockedHeight = next;
-			content.style.setProperty("--aa-gallery-hover-image-height", `${next}px`);
-			content.addEventListener("transitionend", () => tooltip.reposition(), { once: true });
-		};
-		const stat = (iconName, value, ariaLabel) => el("span", { className: "aa-gallery-hover__stat", attrs: { "aria-label": ariaLabel }, children: [icon(iconName), value] });
-		const resolution = el("span", null, dimensions(post));
-		const score = el("span", null, String(post.score ?? 0));
-		const favorites = el("span", null, String(post.favCount ?? 0));
-		const tags = el("span", null, post.tags ? String(tagCount(post.tags)) : "—");
-		const hasRating = Boolean(post.rating) && Boolean(capability(post.source)?.ratings?.length);
-		const rating = hasRating ? el("span", { className: "aa-gallery-hover__rating", attrs: { "data-rating": ratingTone(post.rating) }, text: ratingLabel(post.rating) }) : null;
-		const tagSpecs = [
-			["artist", "brush", 3], ["character", "person", 4], ["copyright", "movie", 2],
-		];
-		const tagRows = Object.fromEntries(tagSpecs.map(([category, iconName, limit]) => {
-			const values = el("p");
-			const root = el("div", { className: `aa-gallery-hover__tag-row is-${category}`, attrs: { hidden: true }, children: [icon(iconName), values] });
-			return [category, { root, values, limit, tags: [], translations: {} }];
-		}));
-		const renderTagRow = (entry) => {
-			entry.values.replaceChildren(...entry.tags.map((tag) => {
-				const translated = entry.translations[tag];
-				return el("span", null, translated ? `${tag.replaceAll("_", " ")} (${translated})` : tag.replaceAll("_", " "));
-			}));
-		};
-		const stats = el("div", { className: "aa-gallery-hover__stats", children: [
-			stat("image", resolution, label("hover.resolution", "Resolution")),
-			stat("thumbUp", score, label("hover.score", "Score")),
-			stat("favorite", favorites, label("hover.favorites", "Favorites")),
-			stat("tag", tags, label("hover.tags", "Tags")),
-			...(rating ? [rating] : []),
-		] });
-		const info = el("div", { className: "aa-gallery-hover__info", children: [
-			stats,
-			el("div", { className: "aa-gallery-hover__tags", children: Object.values(tagRows).map((entry) => entry.root) }),
-		] });
-		const content = el("div", { className: "aa-gallery-hover", children: [
-			el("div", { className: "aa-gallery-hover__media", children: [base, upgrade, loading] }),
-			info,
-		] });
-		applyHoverImageSize(post);
-		base.addEventListener("load", () => { if (upgrade.hidden) tooltip.reposition(); });
-		base.addEventListener("error", () => {
-			loading.hidden = true;
-			if (sampleRequested && base.getAttribute("src") !== sampleRequested) base.src = sampleRequested;
-		});
-		tooltip.show(anchor, content, { className: "aa-gallery-hover-tooltip", immediate: true, interactive: false, placement: "side" });
-		let sampleRequested = null;
-		const upgradeSample = (sampleSrc) => {
-			if (sampleRequested === sampleSrc || base.getAttribute("src") === sampleSrc) return;
-			sampleRequested = sampleSrc;
-			const cachedImage = cacheImage(sampleSrc);
-			const apply = () => {
-				if (!content.isConnected || !tooltip.isOpenFor(anchor) || sampleRequested !== sampleSrc) return;
-				loading.hidden = true;
-				const settle = () => {
-					if (sampleRequested !== sampleSrc || !upgrade.classList.contains("is-visible")) return;
-					base.src = sampleSrc;
-					upgrade.classList.remove("is-visible");
-					upgrade.hidden = true;
-					upgrade.removeAttribute("src");
-				};
-				upgrade.addEventListener("transitionend", settle, { once: true });
-				upgrade.src = sampleSrc;
-				upgrade.hidden = false;
-				requestAnimationFrame(() => upgrade.classList.add("is-visible"));
-			};
-			if (cachedImage?.ready) apply();
-			else { loading.hidden = false; void cachedImage?.promise.then(apply).catch(() => { if (sampleRequested === sampleSrc) loading.hidden = true; }); }
-		};
-		if (readySampleSrc) { sampleRequested = readySampleSrc; loading.hidden = true; }
-		else if (searchSampleSrc) upgradeSample(searchSampleSrc);
-		void getDetail(post).then((detail) => {
-			if (!content.isConnected || !tooltip.isOpenFor(anchor)) return;
-			resolution.textContent = dimensions(detail);
-			score.textContent = String(detail.score ?? post.score ?? 0);
-			favorites.textContent = String(detail.favCount ?? post.favCount ?? 0);
-			tags.textContent = String(tagCount(detail.tags));
-			if (rating) { rating.dataset.rating = ratingTone(detail.rating); rating.textContent = ratingLabel(detail.rating); }
-			applyHoverImageSize(detail);
-			const translationTags = [];
-			for (const [category, entry] of Object.entries(tagRows)) {
-				entry.tags = (detail.tags?.[category] || []).slice(0, entry.limit);
-				entry.root.hidden = !entry.tags.length;
-				renderTagRow(entry);
-				for (const tag of entry.tags) translationTags.push({ name: tag, category });
-			}
-			if (currentLocale() === "zh" && translationTags.length) void streamTagTranslations({
-				locale: "zh",
-				tags: translationTags,
-				signal: translationAbort.signal,
-				onChunk: ({ translations }) => {
-					if (!content.isConnected || !tooltip.isOpenFor(anchor)) return;
-					for (const entry of Object.values(tagRows)) { Object.assign(entry.translations, translations); renderTagRow(entry); }
-					tooltip.reposition();
-				},
-			});
-			const detailSample = detail.sampleUrl && detail.sampleUrl !== post.previewUrl ? detail.sampleUrl : null;
-			if (detailSample && detailSample !== post.sampleUrl) upgradeSample(proxyUrl(detail.source, detailSample));
-			if (!detailSample && !searchSample) loading.hidden = true;
-		}).catch(() => { loading.hidden = true; });
-	};
+	const { tooltip, showHover } = createGalleryHover({
+		cacheImage, capability, createTooltip, currentLocale, dimensions, el, getDetail, icon, label,
+		previewCache, proxyUrl, ratingLabel, ratingTone, streamTagTranslations, tagCount,
+	});
 	const openDetail = async (post) => {
 		const openGeneration = ++detailDialogGeneration; activeDetailDialog?.close(); activeDetailDialog = null;
 		const detail = await getDetail(post); const key = `${post.source}:${post.postId}`; const selected = stateFor(node).selections.some((item) => selectionKey(item) === key);
@@ -696,31 +622,6 @@ return function buildController(node, elements) {
 		const save = button({ label: label("editor.save", "Save local tags"), variant: "primary", onClick: () => { const edited = values(); if (selectedIndex >= 0) transact(node, (state) => { state.selections[selectedIndex].editedTags = edited; }); else sessionEdits.set(key, edited); renderSelected(); dialog.close(); } });
 		dialog = createDialog({ title: label("editor.title", "Edit local tags"), body, footer: el("div", { className: "aa-gallery-dialog-actions", children: [restore, copy, save] }), size: "lg", className: "aa-gallery-tag-editor-dialog", confirmOnEnter: false });
 	};
-	const pickRandomSelection = async () => {
-		if (!posts.length) return null;
-		const index = Math.floor(Math.random() * posts.length);
-		const post = posts[index];
-		const detail = await getDetail(post);
-		const selection = selectionFromDetail(detail, sessionEdits.get(`${post.source}:${post.postId}`));
-		if (!selection) throw new Error(label("error.incomplete", "The post detail is incomplete."));
-		return { post, selection };
-	};
-	const drawRandom = async () => {
-		try {
-			const result = await pickRandomSelection();
-			if (!result) {
-				app.extensionManager.toast.add({ severity: "warning", summary: label("gacha.title", "Random draw"), detail: label("gacha.noPosts", "No posts on the current page. Try loading a page first."), life: 4000 });
-				return;
-			}
-			transact(node, (state) => { state.selections = [result.selection]; });
-			renderSelected();
-			refreshCards();
-			app.extensionManager.toast.add({ severity: "success", summary: label("gacha.title", "Random draw"), detail: label("gacha.drawn", "Randomly selected post #{id}").replace("{id}", result.post.postId), life: 3200 });
-		} catch (error) {
-			console.error("[Aaalice] Random draw failed", error);
-			app.extensionManager.toast.add({ severity: "error", summary: label("gacha.title", "Random draw"), detail: error.message, life: 5000 });
-		}
-	};
 	return {
 		tooltip,
 		get selectedDragFrom() { return selectedDragFrom; },
@@ -747,39 +648,31 @@ return function buildController(node, elements) {
 		setMode,
 		setSelectionMode,
 		showError,
-		drawRandom,
-		pickRandomSelection,
-		hasPosts() { return posts.length > 0; },
-		autoLoadTimer: 0,
-		startAutoLoad(maxPosts = 0) {
-			if (this.autoLoadTimer) return;
-			const limit = Math.max(0, Number(maxPosts) || 0);
-			const loop = () => {
-				if (destroyed || ended || (limit > 0 && posts.length >= limit)) { this.stopAutoLoad(); return; }
-				if (loading) { this.autoLoadTimer = setTimeout(loop, 1000); return; }
-				search().finally(() => {
-					if (!this.autoLoadTimer) return;
-					this.autoLoadTimer = setTimeout(loop, 2000);
-				});
-			};
-			this.autoLoadTimer = setTimeout(loop, 500);
+		getLastError() { return lastError; },
+		syncState() { eachView((view) => view.syncState()); renderSelected(); },
+		attachSurface(view) {
+			if (destroyed) throw new Error("Cannot attach a Gallery surface after its node was removed");
+			surfaces.add(view); view.syncState();
+			view.masonryController.setItems(posts, { preserveScroll: false });
+			view.loading.hidden = !loading; view.pageControl?.setBusy?.(loading); if (view.randomMode) view.randomMode.disabled = loading;
+			const noResults = ended && !posts.length;
+			view.endLabel.textContent = endMessage || label("end", "End of results"); view.end.hidden = !ended || noResults;
+			view.emptyResults.hidden = !noResults; if (noResults && emptyMessage) view.emptyResults.querySelector("span").textContent = emptyMessage;
+			view.continueResults.hidden = !manualContinuation;
+			if (lastError) { view.errorLabel.textContent = lastError.summary; view.error.hidden = false; view.error.classList.toggle("is-top", !posts.length); }
+			renderSelected();
 		},
-		stopAutoLoad() {
-			clearTimeout(this.autoLoadTimer); this.autoLoadTimer = 0;
-		},
-		updateSize(post, width, height) { elements.masonryController.updateItemSize(`${post.source}:${post.postId}`, width, height); },
+		detachSurface(view) { if (surfaces.delete(view)) view.destroy(); },
+		updateSize(post, width, height) { for (const masonry of masonryControllers()) masonry.updateItemSize(`${post.source}:${post.postId}`, width, height); },
 		destroy() {
 			destroyed = true; generation += 1; detailDialogGeneration += 1;
-			clearTimeout(pageCommitTimer); pageCommitTimer = 0;
-			this.stopAutoLoad();
-			clearTimeout(prefetchTimer); prefetchTimer = 0;
-			requestController?.abort();
-			activeDetailDialog?.close(); activeDetailDialog = null;
-			endSelectedDrag();
-			elements.selectedDropIndicator?.remove();
-			tooltip.destroy();
-			elements.masonryController.destroy();
-			elements.selectedList.destroy();
+			clearTimeout(errorTimer); errorTimer = 0; clearTimeout(pageCommitTimer); pageCommitTimer = 0; clearTimeout(prefetchTimer); prefetchTimer = 0;
+			requestController?.abort(); activeDetailDialog?.close(); activeDetailDialog = null;
+			endSelectedDrag(); tooltip.destroy();
+			for (const view of views()) {
+				surfaces.delete(view); if (typeof view.destroy === "function") view.destroy();
+				else { view.masonryController?.destroy?.(); view.selectedList?.destroy?.(); view.selectedDropIndicator?.remove?.(); }
+			}
 			detailCache.clear(); rotatePreviewCache();
 		},
 	};

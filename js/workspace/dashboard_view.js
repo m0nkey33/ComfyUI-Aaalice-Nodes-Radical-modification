@@ -33,7 +33,7 @@ export function renderDashboard(container, host) {
 		openComponentNoteEditor, numericRangeForControl, flushDeferredWorkspaceRender, notifyWorkspaceImageUpload,
 		notifyControlBindingError, openManageLinkedBindings, openRebind, controlTitle, openCardActions, openMoveControl,
 		openAssignGroup, resolve, syncDashboardSourceGroup, dashboardColumnsForWorkspaceWidth, dashboardScrollState,
-		setScrollTopImmediately, dashboardScrollTop,
+		setScrollTopImmediately, dashboardScrollTop, observeDashboardViewport,
 	} = runtime;
 	let editMode = runtime.getEditMode();
 	const viewState = runtime.viewState;
@@ -222,8 +222,8 @@ export function renderDashboard(container, host) {
 	].filter(Boolean) : [];
 	const utilityActions = editMode ? [] : [
 		iconButton({ iconName: "sliders", label: t("aaalice.workspace.valueProfiles.open", "Adjustment profiles"), variant: "ghost", size: "sm", className: "aa-dashboard-toolbar-action aa-dashboard-value-profiles", onClick: () => openValueProfiles() }),
-		button({ iconName: "upload", label: t("aaalice.workspace.preset.export", "Export layout"), variant: "ghost", size: "sm", className: "aa-dashboard-toolbar-action", onClick: () => openDashboardExport(model) }),
-		button({ iconName: "download", label: t("aaalice.workspace.preset.import", "Import layout"), variant: "ghost", size: "sm", className: "aa-dashboard-toolbar-action", onClick: () => pickFile(".json,application/json", importDashboardPreset) }),
+		button({ iconName: "upload", label: t("aaalice.workspace.preset.export", "Export preset"), variant: "ghost", size: "sm", className: "aa-dashboard-toolbar-action", onClick: () => openDashboardExport(model) }),
+		button({ iconName: "download", label: t("aaalice.workspace.preset.import", "Import preset"), variant: "ghost", size: "sm", className: "aa-dashboard-toolbar-action", onClick: () => pickFile(".json,application/json", importDashboardPreset) }),
 		search.toggle,
 	];
 	const pageSettingsButton = page ? iconButton({
@@ -435,6 +435,7 @@ export function renderDashboard(container, host) {
 	}
 	const pageStage = el("div", { className: "aa-dashboard-page-stage", children: [...(pageSnapshot ? [pageSnapshot] : []), scroll] });
 	const body = el("div", { className: "aa-dashboard-body", children: [pageStage, pageRail, selectionBar.root] }); container.append(body);
+	observeDashboardViewport(host, body, grid, resolvedPage, resolvedControls);
 	scroll.addEventListener("scroll", () => {
 		const scrollState = dashboardScrollState(host);
 		if (searchOpen) scrollState.searchTop = scroll.scrollTop;
@@ -444,15 +445,22 @@ export function renderDashboard(container, host) {
 	updateSelectionUi = () => {
 		const selectedItems = page.items.filter((item) => viewState.selectedItemIds.has(item.id)); const selectedGroups = page.groups.filter((group) => viewState.selectedGroupIds.has(group.id));
 		viewState.selectedItemIds = new Set(selectedItems.map((item) => item.id)); viewState.selectedGroupIds = new Set(selectedGroups.map((group) => group.id));
-		for (const card of grid.querySelectorAll("[data-dashboard-item-id]")) card.classList.toggle("is-selected", viewState.selectedItemIds.has(card.dataset.dashboardItemId));
-		for (const group of grid.querySelectorAll("[data-dashboard-group-id]")) group.classList.toggle("is-selected", viewState.selectedGroupIds.has(group.dataset.dashboardGroupId));
+		for (const card of grid.querySelectorAll("[data-dashboard-item-id]")) {
+			const selected = viewState.selectedItemIds.has(card.dataset.dashboardItemId);
+			const inherited = Boolean(card.dataset.dashboardGroupMember && viewState.selectedGroupIds.has(card.dataset.dashboardGroupMember));
+			card.classList.toggle("is-selected", selected); card.classList.toggle("is-selection-member", inherited);
+		}
+		for (const group of grid.querySelectorAll("[data-dashboard-group-id]")) {
+			const selected = viewState.selectedGroupIds.has(group.dataset.dashboardGroupId);
+			group.classList.toggle("is-selected", selected);
+		}
 		const count = selectedItems.length + selectedGroups.length; const canUngroup = selectedGroups.length > 0 || selectedItems.some((item) => item.groupId); const selectedControls = selectedItems.filter((item) => item.kind === "control");
 		body.classList.toggle("has-selection-actions", count > 0);
 		selectionBar.update({ count, summary: t("aaalice.workspace.selection.summary", "{count} selected").replace("{count}", count), actions: {
 				group: { disabled: selectedItems.length < 2 || selectedGroups.length > 0 }, ungroup: { disabled: !canUngroup }, width: { disabled: !selectedControls.length || selectedGroups.length > 0 }, remove: { disabled: count === 0 }, clear: { disabled: count === 0 },
 		} });
 	};
-	dashboardInteraction = bindDashboardInteractions(grid, { editMode, interactionSurface: container, selectedItemIds: viewState.selectedItemIds, selectedGroupIds: viewState.selectedGroupIds, groupDropLabel: t("aaalice.workspace.group.addItem", "Add to group"),
+	dashboardInteraction = bindDashboardInteractions(grid, { editMode, interactionSurface: container, selectedItemIds: viewState.selectedItemIds, selectedGroupIds: viewState.selectedGroupIds, groupDropLabel: t("aaalice.workspace.group.addItem", "Add to group"), flowDropLabel: t("aaalice.workspace.layout.autoPlace", "Auto place"),
 		onSelectionChange: (items, groups) => { viewState.selectedItemIds = items; viewState.selectedGroupIds = groups; updateSelectionUi(); },
 		onDropItems: (ids, target) => updateDashboard((current) => target.precise === false ? moveItems(current, ids, page.id, { groupId: target.groupId }) : moveItems(current, ids, page.id, target)), onDropGroup: (groupId, target) => updateDashboard((current) => moveGroup(current, page.id, groupId, target.row, target.column)),
 		onDropSelection: (itemIds, groupIds, target) => updateDashboard((current) => moveTopLevelSelection(current, page.id, itemIds, groupIds, target.precise === false ? {} : target)),

@@ -81,15 +81,15 @@ test("Dashboard V4 layout editing uses transient integer-grid gestures and one c
 	assert.match(dashboardInteractions, /setPointerCapture/);
 	assert.match(dashboardInteractions, /translate3d/);
 	assert.match(dashboardInteractions, /function gridTargetAt/);
-	assert.match(dashboardInteractions, /target\.column = Math\.max\(0, Math\.min\(columns - columnSpan, target\.column\)\)/);
+	assert.match(dashboardInteractions, /column = Math\.max\(0, Math\.min\(columns - columnSpan, column\)\)/);
 	assert.match(dashboardInteractions, /aa-dashboard-drop-preview/);
 	assert.match(dashboardInteractions, /style\.gridAutoRows/);
 	assert.match(dashboardInteractions, /--aa-dashboard-row-span/);
 	assert.match(dashboardInteractions, /export function grabSpanOffset/);
 	assert.match(dashboardInteractions, /grabColumnOffset = grabSpanOffset/);
 	assert.match(dashboardInteractions, /grabRowOffset/);
-	assert.match(dashboardInteractions, /rawTarget\.column - gesture\.grabColumnOffset/);
-	assert.match(dashboardInteractions, /rawTarget\.row - gesture\.grabRowOffset/);
+	assert.match(dashboardInteractions, /rawTarget\.column - current\.grabColumnOffset/);
+	assert.match(dashboardInteractions, /rawTarget\.row - current\.grabRowOffset/);
 	assert.match(dashboardInteractions, /event\.key === "Escape"/);
 	assert.match(dashboardInteractions, /onDropItems/);
 	assert.doesNotMatch(dashboardInteractions, /graph\.extra|beforeChange|afterChange/);
@@ -118,7 +118,6 @@ test("Dashboard V4 layout editing uses transient integer-grid gestures and one c
 	assert.match(theme, /\.is-layout-editing :is\(\[data-dashboard-item-id\], \[data-dashboard-group-id\]\) \{ cursor: grab; \}/);
 	assert.match(theme, /\.is-layout-editing \.aa-dashboard-group \.aa-control-card\.is-group-member:not\(\.has-dashboard-tone\) \{[^}]*cursor: grab;/);
 	assert.match(dashboardInteractions, /event\.key === " " && !event\.repeat/);
-	assert.match(dashboardInteractions, /precise = !current\.membershipTarget && Number\(target\.grid\.dataset\.dashboardColumns\) !== 1 && current\.elements\.every/);
 	assert.match(dashboardInteractions, /containedIds/);
 	assert.match(dashboardInteractions, /dashboardGroupMember/);
 	assert.match(dashboardSelection, /export function containedIds/);
@@ -242,7 +241,7 @@ test("complete sidebar presets track layout and values as a custom working copy"
 	assert.match(workspace, /dashboardPreset\.(created|updated|duplicated|renamed|deleted)/);
 	assert.match(workspace, /deleteCurrentDashboardPreset[\s\S]*confirmAction\(message, \{ title: dashboardPresetLabels\(\)\.delete, confirmLabel: dashboardPresetLabels\(\)\.delete, danger: true \}\)[\s\S]*removeDashboardPreset/);
 	assert.match(workspace, /commitDeletedActiveDashboardPreset[\s\S]*planDashboardPresetApplication/);
-	assert.match(workspace, /normalizeDashboard\(emptyDashboard\(\)\)/);
+	assert.match(workspace, /applicationPlan = plan \|\| \{ dashboard: emptyDashboard\(\), ready: \[\], issues: \[\] \}/);
 	assert.match(enLocale, /deleteSwitchConfirm/);
 	assert.match(enLocale, /deleteLastConfirm/);
 	assert.match(zhLocale, /deleteSwitchConfirm/);
@@ -318,8 +317,8 @@ test("complete sidebar presets track layout and values as a custom working copy"
 	assert.match(widgetAdapters, /applyPresetValue/);
 	assert.match(enLocale, /"title": "Sidebar presets"/);
 	assert.match(zhLocale, /"title": "侧边栏预设"/);
-	assert.match(enLocale, /"preset": \{ "title": "Layout backup"/);
-	assert.match(zhLocale, /"preset": \{ "title": "布局备份"/);
+	assert.match(enLocale, /"preset": \{ "title": "Preset backup"/);
+	assert.match(zhLocale, /"preset": \{ "title": "预设备份"/);
 });
 
 test("sidebar preset auto-save is enabled by default and lives beside the pin control", () => {
@@ -491,7 +490,7 @@ test("import and export use one reusable review flow with explicit outcomes", ()
 	const transferEnd = theme.indexOf("@media (max-width: 720px)", transferStart);
 	const transferTheme = theme.slice(transferStart, transferEnd > transferStart ? transferEnd : theme.length);
 	assert.doesNotMatch(transferTheme, /(?:linear|radial)-gradient/);
-	assert.match(transferTheme, /\.aa-dashboard-import-mode\[data-value="values"\]/);
+	assert.match(transferTheme, /\.aa-dashboard-import-mode \{[^}]*--aa-import-mode-tone: var\(--aa-import-values-tone\)/);
 	assert.match(transferTheme, /button\[data-value="new"\] \.aa-ui-icon/);
 	assert.match(transferTheme, /button\[data-value="values"\] \.aa-ui-icon/);
 	assert.match(transferTheme, /\.aa-transfer-hero \{[^}]*border: 1px solid transparent[^}]*box-shadow:/);

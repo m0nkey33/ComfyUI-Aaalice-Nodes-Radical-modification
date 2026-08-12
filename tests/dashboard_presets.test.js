@@ -13,6 +13,7 @@ import {
 	emptyDashboardPresetState,
 	normalizeDashboardPresetState,
 	parseDashboardPreset,
+	parseDashboardPresetForImport,
 	removeDashboardPreset,
 	renameDashboardPreset,
 	replaceDashboardPreset,
@@ -37,6 +38,19 @@ test("sidebar presets own complete layout and value snapshots", () => {
 	assert.equal(created.baselinePresetId, created.presets[0].id);
 	assert.deepEqual(created.presets[0].dashboard, layout());
 	assert.deepEqual(created.presets[0].values, values());
+});
+
+test("creating an imported preset selects the new copy without mutating the base", () => {
+	let state = createDashboardPreset(emptyDashboardPresetState(), "Base", snapshot());
+	const baselineId = state.baselinePresetId; const baseBefore = structuredClone(state.presets[0]);
+	state = createDashboardPreset(state, "Imported values", snapshot(32, 6));
+	assert.equal(state.presets.length, 2);
+	assert.notEqual(state.baselinePresetId, baselineId);
+	assert.deepEqual(state.presets[0], baseBefore);
+	assert.equal(state.presets[1].id, state.baselinePresetId);
+	assert.equal(state.presets[1].name, "Imported values");
+	assert.equal(state.presets[1].values[KEY].payload, 32);
+	assert.equal(state.presets[1].dashboard.pages[0].items[0].layout.column, 6);
 });
 
 test("preset management preserves identity and does not apply duplicates", () => {
@@ -152,6 +166,18 @@ test("portable backups use the same normalized snapshot contract", () => {
 	assert.equal(serialized.format, "aaalice-sidebar-preset");
 	assert.deepEqual(parseDashboardPreset(serialized), snapshot());
 	assert.throws(() => parseDashboardPreset({ ...serialized, version: 99 }), /Unsupported sidebar preset backup/);
+});
+
+test("import parsing isolates invalid legacy values instead of rejecting the complete layout", () => {
+	const serialized = serializeDashboardPreset(snapshot());
+	serialized.values.bad = { valueType: "number" };
+	assert.throws(() => parseDashboardPreset(serialized), /Invalid preset value/);
+	const parsed = parseDashboardPresetForImport(serialized);
+	assert.deepEqual(parsed.snapshot, snapshot());
+	assert.equal(parsed.issues.length, 1);
+	assert.deepEqual({ key: parsed.issues[0].key, status: parsed.issues[0].status }, { key: "bad", status: "invalid" });
+	assert.equal(parsed.issues[0].reason, "invalid-preset-value");
+	assert.throws(() => parseDashboardPresetForImport({ ...serialized, dashboard: { version: 99, pages: [] } }), /Unsupported dashboard version/);
 });
 
 test("preset file stems and conflict names share one portable naming contract", () => {
