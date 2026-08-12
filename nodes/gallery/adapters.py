@@ -320,10 +320,10 @@ class DanbooruAdapter(BooruAdapter):
 
     async def search(self, session, query, ratings, sort, cursor, limit, credentials, blacklist=()):
         page = max(1, _int(cursor) or 1)
-        # Danbooru counts all tokens (tags + negative exclusions + metatags) toward
-        # max_search_tags (2 for anonymous).  Drop metatags if the base query already
-        # fills the budget; remaining blacklist items are enforced locally by
-        # _is_blacklisted.  Rating filtering is still applied locally on results.
+        # Danbooru counts all tokens (tags + metatags) toward max_search_tags
+        # (2 for anonymous).  Drop metatags when the base query already fills
+        # the budget, otherwise the API returns HTTP 422.  Blacklist and rating
+        # filters are enforced locally on the results below.
         existing_tag_count = len(query.strip().split()) if query.strip() else 0
         max_tags = self.capabilities.max_search_tags or 0
         use_order = bool(sort and sort != "latest")
@@ -334,13 +334,7 @@ class DanbooruAdapter(BooruAdapter):
             use_order = False
         if existing_tag_count + (1 if use_order else 0) + (1 if use_rating else 0) > max_tags:
             use_rating = False
-        metatag_count = (1 if use_rating else 0) + (1 if use_order else 0)
-        budget = max(0, max_tags - existing_tag_count - metatag_count)
-        if budget > 0 and blacklist:
-            valid_exclusions = tuple(tag for tag in blacklist if re.fullmatch(r"[^\s:]+", tag) and not tag.startswith("-"))
-            tags = _with_blacklist(query, valid_exclusions[:budget])
-        else:
-            tags = query
+        tags = query.strip()
         if use_rating:
             tags = f"{tags} rating:{','.join(ratings)}".strip()
         if use_order:
