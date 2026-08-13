@@ -132,7 +132,7 @@ export function createGallerySurfaceFactory(dependencies) {
 			if (enabled) controller.startAutoLoad(getSettings()?.gachaMaxPosts); else controller.stopAutoLoad();
 		} });
 		gachaToggle.setAttribute("aria-pressed", "false");
-		const gachaDraw = iconButton({ className: "aa-gallery-toolbar-action aa-gallery-gacha-draw", iconName: "shuffle", label: label("gacha.draw", "Draw"), title: label("gacha.drawHint", "Randomly select one post from the current page"), variant: "ghost", onClick: () => controller.drawRandom() });
+		const gachaDraw = button({ className: "aa-gallery-toolbar-action aa-gallery-gacha-draw", iconName: "shuffle", label: label("gacha.draw", "Draw"), title: label("gacha.drawHint", "Randomly select one post from the current page"), variant: "ghost", size: "sm", onClick: () => controller.drawRandom() });
 		gachaDraw.hidden = true;
 		function syncGachaPresentation(active) {
 			active = Boolean(active); gachaToggle.classList.toggle("is-active", active);
