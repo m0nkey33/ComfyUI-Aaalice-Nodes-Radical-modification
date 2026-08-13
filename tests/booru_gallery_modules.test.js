@@ -115,6 +115,69 @@ function galleryDialogHarness() {
 	return { buttons, dependencies, dialogs, proxiedUrls, toastCalls, translations };
 }
 
+function searchControlHarness(query = "") {
+	const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+	const originalQueueMicrotask = globalThis.queueMicrotask;
+	const state = { query, filters: { feed: "search", period: "" }, navigation: { page: 1 } };
+	const listeners = new Map();
+	const input = {
+		value: "", className: "", dataset: {},
+		addEventListener(type, listener) { listeners.set(type, listener); },
+		setAttribute() {}, hasAttribute() { return false; }, focus() {}, setSelectionRange() {},
+	};
+	const root = { classList: { toggle() {} }, append() {} };
+	const toggle = { hidden: false, setSearchOpen() {}, setSearchValue() {} };
+	Object.defineProperty(globalThis, "document", { configurable: true, value: { activeElement: null, createElement: () => input } });
+	globalThis.queueMicrotask = (callback) => callback();
+	const dialogs = createGalleryDialogs({
+		...galleryDialogHarness().dependencies,
+		el: () => root,
+		iconButton: (options) => options,
+		searchQuery: (value) => value.query,
+		searchToggleButton: () => toggle,
+		stateFor: () => state,
+		transact: (_node, callback) => callback(state),
+	});
+	const node = { _aaGalleryController: { search() {} } };
+	const control = dialogs.createSearchControl(node);
+	node._aaGalleryController.syncState = () => control.sync();
+	return {
+		control, input, listeners, state,
+		restore() {
+			globalThis.queueMicrotask = originalQueueMicrotask;
+			if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+			else delete globalThis.document;
+		},
+	};
+}
+
+test("collapsed gallery search preserves the submitted draft across synchronous state sync", () => {
+	const harness = searchControlHarness("old query");
+	try {
+		harness.control.setOpen(true, { focus: false });
+		harness.input.value = "new query";
+		harness.listeners.get("input")();
+		// Collapsing moves focus before click; a host sync in that gap must not restore the old query.
+		harness.control.sync();
+		harness.control.setOpen(false);
+		assert.equal(harness.state.query, "new query");
+		assert.equal(harness.input.value, "new query");
+		assert.equal(harness.control.getValue(), "new query");
+	} finally { harness.restore(); }
+});
+
+test("gallery search draft is not overwritten by an unrelated state sync", () => {
+	const harness = searchControlHarness("committed query");
+	try {
+		harness.input.value = "live draft";
+		harness.listeners.get("input")();
+		harness.control.sync();
+		assert.equal(harness.input.value, "live draft");
+		assert.equal(harness.control.getValue(), "live draft");
+		assert.equal(harness.state.query, "committed query");
+	} finally { harness.restore(); }
+});
+
 test("gallery dialog factory invokes single-selection dialog with its explicit i18n dependency", () => {
 	const harness = galleryDialogHarness();
 	const dialogs = createGalleryDialogs(harness.dependencies);
@@ -194,6 +257,44 @@ test("gallery controller exposes a persistent TLS summary without dropping raw d
 		console.error = previousConsoleError;
 		controller.destroy();
 	}
+});
+
+test("attaching the Dashboard projection suspends the duplicate node projection", () => {
+	const activity = [];
+	const makeSurface = (placement) => ({
+		placement,
+		root: { isConnected: true },
+		setProjectionEnabled(enabled) { activity.push([placement, enabled]); },
+		syncState() {},
+		masonryController: { setItems() {}, destroy() {} },
+		selectedList: { setItems() {}, destroy() {} },
+		selectedDropIndicator: null,
+		loading: { hidden: true },
+		pageControl: { setBusy() {} },
+		end: { hidden: true }, endLabel: { textContent: "" },
+		emptyResults: { hidden: true, querySelector: () => ({ textContent: "" }) },
+		continueResults: { hidden: true },
+		error: { hidden: true, classList: { toggle() {} } }, errorLabel: { textContent: "" },
+		tabs: { setValue() {} }, selectionMode: { setValue() {} }, selectedCount: { textContent: "", setAttribute() {} },
+		selectedSummary: { textContent: "" }, selectedClear: { disabled: false }, emptySelected: { hidden: true },
+		mode: "browse", destroy() { activity.push([placement, "destroy"]); },
+	});
+	const nodeSurface = makeSurface("node");
+	const dashboardSurface = makeSurface("dashboard");
+	dashboardSurface.viewportActive = true;
+	const controller = createGalleryControllerFactory({
+		createTooltip: () => ({ hide() {}, destroy() {} }), label: (_key, fallback) => fallback,
+		stateFor: () => ({ selections: [], selectionMode: "multi" }),
+	})({}, nodeSurface);
+
+	controller.attachSurface(dashboardSurface);
+	assert.deepEqual(activity.slice(-2), [["node", false], ["dashboard", true]]);
+	dashboardSurface.viewportActive = false;
+	controller.syncProjectionActivity();
+	assert.deepEqual(activity.slice(-2), [["node", true], ["dashboard", true]], "a hidden Dashboard page must release the canvas projection");
+	controller.detachSurface(dashboardSurface);
+	assert.deepEqual(activity.slice(-2), [["dashboard", "destroy"], ["node", true]]);
+	controller.destroy();
 });
 
 test("random browse requests omit cursors and keep source-scoped posts unseen across draws", async () => {

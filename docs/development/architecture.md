@@ -7,9 +7,12 @@
 | 节点 | Category | 执行职责 | 前端职责 |
 |---|---|---|---|
 | `QuickGroupManager` | `Aaalice/control` | 无 Prompt I/O 和执行副作用 | 发现、过滤、排序并原子切换当前图的可视组 |
+| `GroupIsEnabled` | `Aaalice/control` | 校验队列提交时的组状态快照并输出 disabled 布尔值 | 选择可视组并在提交前注入成员模式快照 |
+| `GroupLogicProbe` | `Aaalice/control` | 校验多组条件快照并按 AND/OR 输出单个布尔值 | 编辑组条件并在提交前注入成员模式快照 |
 | `ResolutionPreset` | `Aaalice/tools` | 校验执行载荷并输出精确 width / height | 预设、精确输入、画幅拖拽、对齐和个人预设管理 |
 | `SimpleStringSplit` | `Aaalice/tools` | 拆分字符串、清理空白并移除空段 | 无业务前端 |
 | `SimpleNotify` | `Aaalice/tools` | 透明透传并返回提醒 payload | 在发起执行的页面发送桌面通知和提示音 |
+| `ConditionalSaveImage` | `Aaalice/tools` | 按开关保存或透明透传 IMAGE | 同步保存选项可用性和禁用状态 |
 | `PromptSelector` | `Aaalice/prompt` | 组合前缀与有序词条正文，校验缺失引用和权重 | 跨分类选择、筛选、排序、权重和实时词库 payload 注入 |
 | `BooruGalleryNode` | `Aaalice/gallery` | 下载有序选择快照，原子解码并输出一一对应的 IMAGE/STRING list | 多站点搜索、虚拟瀑布流、选择排序、本地标签编辑、详情、收藏与设置 |
 | `FetchFromKrita` | `Aaalice/krita` | 每次执行请求当前活动文档快照并输出 IMAGE/MASK | Bridge 连接、活动文档与最近获取状态，以及共享 Krita 设置入口 |
@@ -20,9 +23,11 @@
 
 - V3 `validate_inputs()` 运行在上游节点执行之前，只允许声明并校验当前 prompt 中已经存在的字面量或前端注入 payload。连接输入的真实值只在 `execute()` 可用，因此所有非空、内容结构和业务语义检查都在执行阶段完成。当前 `PromptSelector` 的自定义校验签名只暴露自己的注入 payload，不使用 `**kwargs` 接收无关连接输入。
 - `nodes/control/quick_group_manager.py` 只注册无输入输出的 V3 节点；组发现和模式变化不进入后端。
+- `GroupIsEnabled` 与 `GroupLogicProbe` 只消费 `graphToPrompt` 注入的组成员模式快照；执行层校验组存在且非空，再分别输出禁用状态或扁平 AND/OR 条件结果。节点不从后端反查当前图。
 - `nodes/tools/resolution_preset.py` 没有可见输入，只接受前端注入的版本化 `resolution_json`，校验 ComfyUI 尺寸范围与基础 8 px 对齐后输出两个具名 INT。个人预设 Store 位于当前用户目录，使用线程锁、临时文件和原子替换；专用 HTTP 路由只负责 CRUD 和明确错误映射。
 - `SimpleStringSplit` 是独立纯后端工具，不依赖参数系统。
 - `SimpleNotify` 使用成对 MatchType 输入输出和 ComfyUI 默认 list 映射。后端只返回透传值与提醒 payload，浏览器副作用不进入执行层。
+- `ConditionalSaveImage` 关闭时透明透传 IMAGE 且不写盘；开启时优先委托已安装的 LoraManager `Save Image` 实现，缺失时只回退 ComfyUI 核心 PNG 保存，LoraManager 专属格式或配方选项显式失败。
 - `PromptSelector` 接收可选前缀并输出单一 STRING；纯逻辑校验有序词条 payload、0–20 权重和分隔符。`nodes/_lib/prompt_library.py` 拥有 SQLite 词库领域服务，`prompt_library_archive.py` 独立负责 ZIP 导入导出与图片归档，HTTP 路由只负责 JSON、图片、ZIP 与变更事件传输。
 - `BooruGalleryNode` 没有可见输入，执行版本化选择 payload，并并发下载最多三张原图；`asyncio.gather` 保持快照顺序，任一下载或解码失败则整体失败。站点适配器统一 Summary、Detail、Page 与 capability（Summary 携带 Sample / Large Preview 地址供前端直接预取），路由只处理 JSON、流式媒体和错误映射；确定性的 TLS 证书校验失败不进入瞬时重试，保留完整底层异常并映射为 `tls_certificate_error`，HTTPS 校验始终开启。媒体代理（`nodes/gallery/media.py`）复用共享连接池，按 URL 磁盘缓存并去重并发请求，瞬时失败退避重试、客户端断开不中断共享下载，逐次复核 HTTPS 白名单、Content-Type 和大小，并使用适配器声明的站点请求头处理媒体源约束（Gelbooru 必须携带站点 Referer，否则上游会把图片重定向到 HTML 帖子页）。缓存与执行原图统一受 `cacheBudgetMiB` 预算修剪。
 - `FetchFromKrita` 没有公开输入且标记为非幂等。执行层写入唯一请求、最多等待 15 秒并响应 ComfyUI 取消；`nodes/_lib/krita_snapshot.py` 校验协议、请求身份、受限路径、PNG、尺寸和选区语义，再规范化为 IMAGE/MASK。Bridge 状态、安装、启用、修复和测试路由与快照执行分离，启动时只检查；用户显式安装或修复时原子更新 Krita 插件开关，覆盖文件或配置前要求 Krita 已关闭。
@@ -92,9 +97,9 @@
 ### Canvas 性能边界
 
 1. LiteGraph 在拖拽和平移期间会逐帧调用尺寸、排列和绘制回调。QuickGroupManager 的可见组快照只在事件驱动的 `render()` 中生成，逐帧高度回调只读取缓存；GroupLogicProbe 的规范化状态按原始对象身份复用。节点位置和无关高度变化不使这些缓存失效。
-2. Dashboard 控件值通过已挂载 `controlView().update()` 定向更新，不替换 DOM、不重算布局；结构变化才重建控件并刷新依赖链。
+2. Dashboard 控件值通过已挂载 `controlView().update()` 定向更新，不替换 DOM、不重算布局；结构变化才重建控件并刷新依赖链。侧边栏预设快照写入不属于图结构变化，不进入 Workspace 图签名；自动保存、手动保存或“已修改”状态变化只在动画帧内定向同步预设选择器。选择器浮层打开时延后替换自身内容直到关闭，不能因此重建 Dashboard 控件树或 Gallery Surface。
 3. 所有顶层节点 DOM widget 使用宿主 `hideOnZoom` 低质量变换路径，画布平移或缩放期间临时绘制占位，稳定后仍用同一持久状态恢复。
-4. Booru Gallery 和 PromptSelector 的宿主 widget 保持注册，插件内部富内容由 `dom_widget_visibility` 以有限视口预热范围切换 active；离屏时虚拟列表/瀑布流释放条目 DOM 和图片源，只保留模型与 spacer 布局，返回视口后按同一 controller 恢复。该机制不修改 ComfyUI 核心、其它插件或工作流持久状态。
+4. Booru Gallery 和 PromptSelector 的宿主 widget 保持注册，插件内部富内容由 `dom_widget_visibility` 以有限视口预热范围切换 active；离屏时虚拟列表/瀑布流释放条目 DOM 和图片源，只保留模型与 spacer 布局，返回视口后按同一 controller 恢复。Gallery 的 Dashboard Surface 进入预热视口时还会暂停同节点的画布 Surface，并在画布内容区显示不参与指针命中的本地化暂停说明；Dashboard Surface 离开预热视口或卸载后同步恢复画布 Surface 并移除说明，避免两个富媒体投影同时挂载卡片和图片，也不留下无原因的空白节点。该机制不修改 ComfyUI 核心、其它插件或工作流持久状态。
 5. Workspace 图签名只读取 widget/options 的静态 own data property；accessor-backed 动态选项由 `CONTROL_HOST_INVALIDATED_EVENT` 失效，加载、撤销和重做由 `afterConfigureGraph` 强制恢复，不在签名阶段执行第三方 getter。
 6. KJ Set/Get 的虚拟连线绘制属于 KJNodes 自身：其 Show links、单节点 `drawConnection` 和 Performance 设置可能独立增加每帧图扫描与连线绘制。本包只通过公开 Set/Get API 做事件驱动的结构同步，不改写 KJNodes 的 canvas renderer。
 7. Dashboard 参数值按稳定 Binding Key 进入进程内 value channel，直接调用现有 Control View 的 `update()` 同步同卡片、重复卡片与多根投影；普通值提交不调用 `renderWorkspace()`，也不重新解析 Provider。Subgraph Provider 按稳定 Control Id 缓存“绑定到哪个 promoted widget”的结构索引，值仍逐次实时读取；嵌套定义 owner 只在图结构或 Control Host 明确失效时清空。自定义 Sidebar 的重复 render 回调在仍拥有原 DOM 树时为 no-op，结构重绘在连续手势期间延后到提交后执行一次。
@@ -158,7 +163,7 @@
 5. capability 控制 Rating、排行榜、直接跳页、认证、原图下载和收藏按钮。排行榜走适配器独立入口；逻辑页码统一从 1 开始，远端 `page` / `pid` 转换不进入前端。Gelbooru 的搜索、详情和标签分类必须使用官方 User ID / API Key；设置边界接受账户页复制的 `&api_key=…&user_id=…` 凭据片段并规范化保存，不能改动其它来源凭据。其 Rating 使用站点当前的 General、Sensitive、Questionable、Explicit；单选分级发送远端 metatag，多选分级因远端不支持同类 metatag OR 而在真实分页结果上本地过滤。Gelbooru 不写收藏。Safebooru 与 AI TAG 不显示账户收藏；AI TAG 直接使用公开搜索、月榜与作品详情 API，并从公开图片元数据生成 Prompt，不把它伪装成传统 Booru Rating/标签分类。AI TAG 列表只提供推导缩略图时保留资源目录大小写；若首图并非 `_p0`，卡片仅在图片失败时按需请求详情恢复真实首图，不把逐帖详情请求恢复到搜索主路径。所有来源都不使用 Cookie、HTML 会话或验证码兼容层。
 6. Gallery 的搜索、过滤列表和本地标签编辑通过 Autocomplete-Plus 的 `raw-tag` 外部输入模式接入补全；站点原始标签身份在插件边界保持不变，面向生成提示词的空格替换、括号转义、画师前缀和自动分隔符不得进入搜索与精确匹配路径。
 7. 随机模式只把开关写入 `booruGalleryState`；已见 `source + postId` 集合由单个前端节点会话拥有，并以来源、查询、频道、周期和 Rating 组成作用域，退出模式或作用域变化时释放。随机 API 不接收顺序 cursor、不写搜索结果缓存，前端请求同时使用 `cache: "no-store"`：Danbooru 搜索使用官方 `random:<limit>` 抽样元标签而不执行 `order:random` 全量排序，Gelbooru / Safebooru 搜索使用来源原生随机排序，AI TAG 以只缓存总数的随机页采样覆盖全集，前端再用 Web Crypto 拒绝采样驱动 Fisher–Yates 洗牌并做稳定身份去重。适配器继续先执行本机黑名单过滤，客户端只把实际展示项记入已见集合；唯一结果耗尽采用有限空批次预算，不以无限翻页维持表面成功。
-8. Gallery 的 Control Spec 整体可预设但不可联动：`booru_gallery_preset.js` 负责版本校验、规范化与深拷贝，捕获包含 Dashboard 搜索框展开状态在内的完整 `booruGalleryState`。应用时先替换节点状态，再定向同步所有节点 / Dashboard Surface 并按恢复页重置搜索；预设从不保存 Summary、滚动位置、浮层、请求状态或随机已见集合。
+8. Gallery 的 Control Spec 整体可预设但不可联动：`booru_gallery_preset.js` 负责版本校验、规范化与深拷贝，捕获包含 Dashboard 搜索框展开状态在内的完整 `booruGalleryState`。搜索控件独立持有尚未提交的草稿和 dirty 状态，控制器同步只在无草稿时采用节点查询，避免收起搜索所触发的同步在提交前回写旧值；收起、失焦或 Enter 再把草稿提交到节点状态。捕获时从已挂载 Dashboard Surface 读取该搜索草稿，仅覆盖新快照中的查询上下文，不提前执行搜索或修改节点状态；应用时先替换节点状态，再定向同步所有节点 / Dashboard Surface 并按恢复页重置搜索。预设从不保存 Summary、滚动位置、浮层、请求状态或随机已见集合。
 
 ### DIY 左侧工作区
 
@@ -170,7 +175,7 @@
    控件卡片可另存可选 `tone` 作为卡片强调色，使用统一 Dashboard tone codec 规范化并随 Dashboard 规范化、复制、预设和便携备份保留；卡片和分隔项还可另存可选 `note` 作为用户 Component Note；它随 Dashboard 规范化、复制、预设和便携备份保留，但不参与 Binding 身份、Provider 解析、联动兼容或控件值比较。编辑与预览统一走 vendored `marked` 和 DOMPurify 的安全 CommonMark/GFM 路径，非 HTTP(S) 链接和图片不进入渲染结果；说明徽章只负责显式打开完整内容，不把长 Markdown 注册为整张卡片的悬浮层。
 6. 来源变化只刷新来源组的派生状态，不自动改写 Dashboard。来源组标题右侧显示 `synced`、`needs-sync`、`syncing`、`missing-source` 或 `error` 状态；用户可执行单组同步，页面右键菜单只同步当前页来源组。纯模型同步按稳定 Binding / Scope Id 原子计算新增、删除、类型更新和重排，保留卡片尺寸、手动成员、组位置/宽度和用户覆盖；只删除明确由当前来源组纳管且来源快照确认已删除的卡片。旧布局首次同步只保守认领精确匹配项，无法确认来源的旧成员保留。
 7. 图变化在动画帧内合并刷新。失效或类型不兼容的绑定原样保留；完整预设导入预检会列出这些风险，并在用户坚持创建含失效绑定的新预设时二次确认。
-8. 侧边栏预设纯模型保存完整 Dashboard 与按稳定 Binding Key 索引的可序列化参数 payload，并从当前 Working Copy 与基准快照计算“已修改”状态；不存在基准时界面只显示中性占位。运行时协调器负责去重、捕获、预检以及布局与参数的共同应用和失败回滚；预检问题展示从快照布局反查页面、布局组、组件显示名和参数名，并把已知 reason code 转为可行动说明；模型文件型 `missing-option` 还需提示核对对应模型目录、名称和相对路径，文件存在时刷新 ComfyUI 网页后重试。禁止向用户显示 Binding Key、promoted 元组或内部状态码。外部导入默认仅导入数值，两种模式都命名并额外创建预设，禁止覆盖已有预设。仅数值导入先复制用户选择的基础预设，以副本 Dashboard 为权威，按 Binding Key 精确匹配，再只在 Provider、值类型和 Control 名称一致的前提下，按稳定 Card Id、Host、页面/布局组上下文或全局同标签语义逐层恢复互为唯一的卡片；禁止按位置或数组顺序写值，歧义与无效源值保留副本原值。新副本持久化、切换到副本 Dashboard 与节点写入在同一图历史和回滚边界；成功后新副本成为当前基准，失败时恢复导入前 Dashboard、基准身份、预设集合和节点值，基础预设快照始终不变。工作区入口负责 ComfyUI 图事务、对话框、切换保护和工作流序列化，Provider 继续是唯一写回节点的边界。预设集合与基准身份位于 `app.graph.extra.aaaliceSidebarPresets`，随工作流文件分发（含 Workflow Hub 的打包与安装，该插件原样保留 `extra`），跨插件契约是“不得剥离未知 extra 键”，Hub 侧零耦合。图同步签名同时覆盖看板与预设 extra，结构相同但持久状态不同的工作流切换标签页时必须刷新。预设保存规范化后的 V4 整数跨度；Provider 的运行时投影不进入持久快照。
+8. 侧边栏预设纯模型保存完整 Dashboard 与按稳定 Binding Key 索引的可序列化参数 payload，并从当前 Working Copy 与基准快照计算“已修改”状态；不存在基准时界面只显示中性占位。运行时协调器负责去重、捕获、预检以及布局与参数的共同应用和失败回滚；预检问题展示从快照布局反查页面、布局组、组件显示名和参数名，并把已知 reason code 转为可行动说明。模型文件型 `missing-option` 在运行时边界先规范化 `/` 与 `\\`，再按文件名检索当前 Combo：唯一候选进入用户确认并只为本次应用替换为实际嵌套路径；无候选或多个同名候选进入明确诊断，但仍把新预设的模型值加入原子写入计划，禁止静默保留旧预设模型。预设快照本身不改写为接收方的本机路径。禁止向用户显示 Binding Key、promoted 元组或内部状态码。外部导入默认仅导入数值，两种模式都命名并额外创建预设，禁止覆盖已有预设。仅数值导入先复制用户选择的基础预设，以副本 Dashboard 为权威，按 Binding Key 精确匹配，再只在 Provider、值类型和 Control 名称一致的前提下，按稳定 Card Id、Host、页面/布局组上下文或全局同标签语义逐层恢复互为唯一的卡片；禁止按位置或数组顺序写值，歧义与无效源值保留副本原值。新副本持久化、切换到副本 Dashboard 与节点写入在同一图历史和回滚边界；成功后新副本成为当前基准，失败时恢复导入前 Dashboard、基准身份、预设集合和节点值，基础预设快照始终不变。工作区入口负责 ComfyUI 图事务、对话框、切换保护和工作流序列化，Provider 继续是唯一写回节点的边界。预设集合与基准身份位于 `app.graph.extra.aaaliceSidebarPresets`，随工作流文件分发（含 Workflow Hub 的打包与安装，该插件原样保留 `extra`），跨插件契约是“不得剥离未知 extra 键”，Hub 侧零耦合。图同步签名同时覆盖看板与预设 extra，结构相同但持久状态不同的工作流切换标签页时必须刷新。预设保存规范化后的 V4 整数跨度；Provider 的运行时投影不进入持久快照。
 9. “组导航”只显示用户手动加入的可视组；版本 3 的导航清单、轮盘激活键、每项 X/Y 目标偏移和目标缩放写入 `app.graph.extra` 并随工作流保存，v1/v2 读取时迁移为 v3，旧条目上的单组快捷键字段不再读取。组状态与边界从当前图实时解析，轮盘打开时只建立一次当前清单快照，提交时再按当前 graph 的实时组 ID 解析目标；搜索、轮盘选择和定位只属于会话视图，导航范围不受 QuickGroupManager 的颜色筛选或排序影响。纯几何和分页规划位于 `js/lib/group_navigation_wheel_model.js`，document-level 浮层、真实 button 扇区、焦点/键盘/指针生命周期位于 `js/workspace/group_navigation_wheel.js`；pointermove 只更新已有扇区状态，不重建 DOM 或重新扫描图。工作流切换、侧栏根隐藏/销毁、窗口失焦和可见性变化都关闭轮盘，避免旧 graph、焦点或监听器跨工作流残留。
 10. Dashboard 页面滚动只作用于当前页面，不再把滚动边界解释为页面切换请求。页面切换由页眉左侧页面按钮、右侧独立 Page Rail 的胶囊点击或键盘操作触发；Page Rail 常态占用 Dashboard body 右侧固定 38px 独立列显示圆点，圆点列不覆盖 Scroll Surface 或控件；收起态圆点使用紧凑间距，只在圆点簇中央的动态命中区响应指针，圆点上下两侧的空白不触发展开；指针进入后圆点间距平滑增大，并始终以 Rail 的垂直中心作为唯一几何基准，扩展 gap 从中心向两侧对称分配；悬停、焦点和指针移动不改变中心，当前 `activePageId` 的 marker 只随所属条目渲染，不创建独立游标；胶囊展开时允许越出该列显示名称，透明悬浮区覆盖胶囊之间的间隙，收起由稳定的 Rail 外边界统一负责，并在布局帧确认已离开整体包络后收回；持久 Rail 被重新挂入页面渲染壳时不得把瞬时 pointerleave 当作真实离开；Dashboard body 必须以固定 flex/grid 轨道提供稳定高度，离场页面快照脱离轨道尺寸计算，避免切页过渡改变 Rail 中心；以选中整体强调光晕表达当前页。Page Rail 不消费滚轮，滚轮不会切换页面。每个侧栏根独立持有 Page Rail、当前页 marker 和过渡状态，根卸载、隐藏或切换工作区时只清理自身展开状态；页面请求按当前 `activePageId` 解析，多根同帧回到原 Page Id 时折叠为无过渡 no-op。`v-show` 隐藏根休眠且不重建 Provider/控件，首次挂载已隐藏的根只建立空占位与生命周期观察，重新可见时由 ResizeObserver 补一次完整渲染，搜索焦点只由发起操作的可见根消费；每个根生成独立 DOM 控件 id，禁止跨根 `label[for]` 命中。自定义页签宿主被 Vue 或其它 custom renderer 替换时，由根与父级所有权观察器清理旧实例及其挂到 `document.body` 的锚定浮层；销毁、隐藏与重绘只关闭锚定于对应根的 Tooltip、Popover 和 Context Menu，不得关闭其它 Graph View、画布节点或扩展的表面；所有脱离根挂到 `document.body` 的菜单必须保存显式 owner，控件销毁同时移除自身浮动编辑器并闭合尚未提交的图事务。
 11. Dashboard 的完整重建只服务结构域：页面/布局、Binding Set、控件类型、动态选项、可用性和来源结构。参数值、Seed after-generate 行为及连续数值预览属于值域；写入完成后保持卡片、输入元素、焦点、Popover 和动画元素 identity。Provider 的 promoted widget 索引只缓存对象身份映射，不缓存值、可用性或预设 payload；`graphChanged`、工作流恢复及 `CONTROL_HOST_INVALIDATED_EVENT` 负责失效，避免以过期 descriptor 代替实时状态。
