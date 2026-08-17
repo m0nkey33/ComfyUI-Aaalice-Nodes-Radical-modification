@@ -28,7 +28,12 @@ def build_danbooru_search_tags(
             raise ValueError(f"danbooru random sampling leaves room for only {public_tag_limit - 1} public search tag")
         tags = f"{tags} random:{size}".strip()
     elif sort and sort != "latest":
-        tags = f"{tags} order:{sort}".strip()
+        # The order: metatag consumes one token of Danbooru's per-user search-tag
+        # budget (unlike rating:, which is free). Drop it when the base query
+        # already fills the budget, otherwise the API rejects the request with
+        # HTTP 422 TagLimitError.
+        if public_tag_limit is None or query_tag_count < public_tag_limit:
+            tags = f"{tags} order:{sort}".strip()
     return tags
 
 
