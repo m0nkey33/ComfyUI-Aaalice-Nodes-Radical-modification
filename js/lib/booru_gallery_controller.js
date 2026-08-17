@@ -659,7 +659,7 @@ export function createGalleryControllerFactory(dependencies) {
 			if (loading) { autoLoadTimer = setTimeout(loop, 1000); return; }
 			search().finally(() => {
 				if (!autoLoadTimer) return;
-				autoLoadTimer = setTimeout(loop, 300000);
+				autoLoadTimer = setTimeout(loop, 60000);
 			});
 		};
 		autoLoadTimer = setTimeout(loop, 500);
