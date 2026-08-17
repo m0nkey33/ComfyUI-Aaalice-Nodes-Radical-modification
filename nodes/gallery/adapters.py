@@ -7,15 +7,23 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass, field
+from datetime import date, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
 from .._lib.booru_query import join_candidates, repair_spaced_tags, tokenize_tag_query
+from .danbooru_query import build_danbooru_search_tags
 
 TAG_CATEGORIES = ("artist", "copyright", "character", "general", "meta")
 STATIC_IMAGE_EXTENSIONS = frozenset({"jpg", "jpeg", "png", "webp", "gif"})
+GALLERY_USER_AGENT = "Aaalice-Nodes/1.0"
+
+
+def _api_headers(accept: str) -> dict[str, str]:
+    # Danbooru challenges aiohttp's generic Python identity; identify the real client instead.
+    return {"Accept": accept, "User-Agent": GALLERY_USER_AGENT}
 
 
 class GalleryUpstreamTimeoutError(RuntimeError):
@@ -153,7 +161,7 @@ class BooruAdapter:
         async with self._semaphore:
             for attempt in range(3):
                 try:
-                    async with session.get(url, params=params, headers={"Accept": "application/json"}, allow_redirects=True) as response:
+                    async with session.get(url, params=params, headers=_api_headers("application/json"), allow_redirects=True) as response:
                         text = await response.text()
                         if _is_upstream_query_timeout(response.status, text):
                             raise GalleryUpstreamTimeoutError(f"{self.source} aborted the query: the result set exceeded its execution budget")
@@ -225,7 +233,7 @@ class BooruAdapter:
             raise ValueError(f"{self.source} media URL is not allowed: {url}")
 
     def media_request_headers(self) -> dict[str, str]:
-        return {}
+        return {"User-Agent": GALLERY_USER_AGENT}
 
     async def test_credentials(self, session: aiohttp.ClientSession, credentials: dict[str, str]) -> dict[str, Any]:
         await self.search(session, "", [], "", None, 1, credentials)
@@ -327,31 +335,11 @@ class DanbooruAdapter(BooruAdapter):
                                   post.get("is_favorited"), str(post.get("large_file_url") or ""),
                                   _int(post.get("score")), _int(post.get("fav_count")))
 
-    async def search(self, session, query, ratings, sort, cursor, limit, credentials, blacklist=()):
-        page = max(1, _int(cursor) or 1)
+    async def _search_page(self, session, query, ratings, sort, page, page_number, limit, credentials, blacklist):
         size = min(max(1, limit), self.capabilities.max_page_size)
-        # Danbooru counts all tokens (tags + metatags) toward max_search_tags
-        # (2 for anonymous).  Drop metatags when the base query already fills
-        # the budget, otherwise the API returns HTTP 422.  Blacklist and rating
-        # filters are enforced locally on the results below.
-        existing_tag_count = len(query.strip().split()) if query.strip() else 0
-        max_tags = self.capabilities.max_search_tags or 0
-        use_order = bool(sort and sort not in ("latest", "random"))
-        use_rating = bool(ratings)
-        # Drop metatags when they would push the total past the limit.
-        # Prefer dropping order over rating so rating filters survive longer.
-        if existing_tag_count + (1 if use_order else 0) + (1 if use_rating else 0) > max_tags:
-            use_order = False
-        if existing_tag_count + (1 if use_order else 0) + (1 if use_rating else 0) > max_tags:
-            use_rating = False
-        tags = query.strip()
-        if use_rating:
-            tags = f"{tags} rating:{','.join(ratings)}".strip()
-        if sort == "random":
-            tags = f"{tags} random:{size}".strip()
-        elif use_order:
-            tags = f"{tags} order:{sort}".strip()
-        raw = await self._get_json(session, f"{self.base}/posts.json", params={"tags": tags, "page": page, "limit": size, **self.auth_params(credentials)})
+        auth = self.auth_params(credentials)
+        tags = build_danbooru_search_tags(query, ratings, sort, size, self.capabilities.max_search_tags)
+        raw = await self._get_json(session, f"{self.base}/posts.json", params={"tags": tags, "page": page, "limit": size, **auth})
         if not isinstance(raw, list):
             raise RuntimeError("danbooru search response must be a list")
         blocked = _normalize_blacklist(blacklist)
@@ -359,20 +347,33 @@ class DanbooruAdapter(BooruAdapter):
         visible = tuple(item for item in candidates if not _is_blacklisted(item, blocked))
         posts = tuple(post for item in visible for post in (self._summary(item),) if rating_matches(self.source, post.rating, ratings))
         warnings = ("local-blacklist-filtered",) if len(visible) < len(candidates) else ()
+        display_page = page_number or 1
         if _restricted_media_hidden(posts):
             # 受限内容（loli/shota 等）对 Member 级及以下账户整页隐藏媒体地址；继续翻页只会得到
             # 同样的空页，直接结束并给出明确信号，由前端提示配置账户。
-            return GalleryPage((), None, True, warnings + ("restricted-media-hidden",), page=page)
-        return GalleryPage(posts, str(page + 1) if len(raw) == size else None, len(raw) < size, warnings, page)
+            return GalleryPage((), None, True, warnings + ("restricted-media-hidden",), page=display_page)
+        next_cursor = str(page_number + 1) if page_number is not None and len(raw) == size else None
+        return GalleryPage(posts, next_cursor, len(raw) < size, warnings, display_page)
+
+    async def search(self, session, query, ratings, sort, cursor, limit, credentials, blacklist=()):
+        page = max(1, _int(cursor) or 1)
+        return await self._search_page(session, query, ratings, sort, page, page, limit, credentials, blacklist)
+
+    async def search_id_cursor(self, session, query, ratings, cursor, limit, credentials, blacklist=()):
+        if not re.fullmatch(r"[ab](?:0|[1-9][0-9]*)", cursor):
+            raise ValueError("danbooru post id cursor is invalid")
+        return await self._search_page(session, query, ratings, "latest", cursor, None, limit, credentials, blacklist)
 
     async def ranking(self, session, period, cursor, limit, credentials, blacklist=()):
         if period not in self.capabilities.ranking_periods:
             raise ValueError(f"danbooru does not support {period} rankings")
         page = max(1, _int(cursor) or 1)
         size = min(max(1, limit), self.capabilities.max_page_size)
-        raw = await self._get_json(session, f"{self.base}/explore/posts/popular.json", params={
-            "scale": period, "page": page, "limit": size, **self.auth_params(credentials),
-        })
+        params = {"scale": period, "page": page, "limit": size, **self.auth_params(credentials)}
+        if period == "day":
+            # Danbooru leaves the current daily period empty until it closes.
+            params["date"] = (date.today() - timedelta(days=1)).isoformat()
+        raw = await self._get_json(session, f"{self.base}/explore/posts/popular.json", params=params)
         if not isinstance(raw, list):
             raise RuntimeError("danbooru ranking response must be a list")
         blocked = _normalize_blacklist(blacklist)
@@ -436,7 +437,7 @@ class DanbooruAdapter(BooruAdapter):
         url = f"{self.base}/favorites" + (f"/{post_id}.json" if not favorite else ".json")
         async with self._semaphore:
             method = session.post if favorite else session.delete
-            kwargs = {"params": params}
+            kwargs = {"params": params, "headers": _api_headers("application/json")}
             if favorite:
                 kwargs["json"] = {"post_id": post_id}
             async with method(url, **kwargs) as response:
@@ -457,7 +458,7 @@ class GelbooruAdapter(BooruAdapter):
 
     def media_request_headers(self) -> dict[str, str]:
         # Gelbooru redirects media requests without a site Referer to the HTML post page.
-        return {"Referer": "https://gelbooru.com/"}
+        return {**super().media_request_headers(), "Referer": "https://gelbooru.com/"}
 
     def auth_params(self, credentials):
         user = str(credentials.get("userId") or "").strip()
@@ -588,7 +589,7 @@ class SafebooruAdapter(GelbooruAdapter):
         async with self._tag_semaphore:
             async with session.get(self.base, params={"page": "dapi", "s": "tag", "q": "index",
                                                       "name": name, "limit": 1},
-                                   headers={"Accept": "application/xml"}, allow_redirects=True) as response:
+                                   headers=_api_headers("application/xml"), allow_redirects=True) as response:
                 if _is_upstream_query_timeout(response.status, await response.text()):
                     raise GalleryUpstreamTimeoutError(f"{self.source} aborted the query: the result set exceeded its execution budget")
                 if response.status >= 400:

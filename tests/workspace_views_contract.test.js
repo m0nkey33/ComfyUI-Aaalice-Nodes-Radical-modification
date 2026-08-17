@@ -18,6 +18,7 @@ const workspace = [
 	"workspace/dialogs.js",
 	"workspace/group_navigation.js",
 	"workspace/library.js",
+	"workspace/category_manager.js",
 	"workspace/dom_utils.js",
 	"workspace/graph_signature.js",
 	"workspace/labels.js",
@@ -29,7 +30,6 @@ const workspace = [
 const selector = readFileSync(join(ROOT, "js", "prompt_selector.js"), "utf8");
 const providers = readFileSync(join(ROOT, "js", "lib", "control_providers.js"), "utf8");
 const widgetAdapters = readFileSync(join(ROOT, "js", "lib", "widget_control_adapters.js"), "utf8");
-const nodeControlMenu = readFileSync(join(ROOT, "js", "lib", "node_control_menu.js"), "utf8");
 const workspaceControls = readFileSync(join(ROOT, "js", "lib", "workspace_controls.js"), "utf8");
 const imageCompareControl = readFileSync(join(ROOT, "js", "lib", "controls", "image_compare.js"), "utf8");
 const numericControl = readFileSync(join(ROOT, "js", "lib", "controls", "numeric.js"), "utf8");
@@ -67,6 +67,8 @@ const imageAssetControl = readFileSync(join(ROOT, "js", "lib", "image_asset_cont
 const imageAssets = readFileSync(join(ROOT, "js", "lib", "image_assets.js"), "utf8");
 const promptEntryDetails = readFileSync(join(ROOT, "js", "lib", "prompt_entry_details.js"), "utf8");
 const categoryColor = readFileSync(join(ROOT, "js", "lib", "category_color.js"), "utf8");
+const categoryPicker = readFileSync(join(ROOT, "js", "lib", "category_picker.js"), "utf8");
+const categoryManager = readFileSync(join(ROOT, "js", "workspace", "category_manager.js"), "utf8");
 const ui = uiSource;
 const uiStyles = readFileSync(join(ROOT, "js", "lib", "ui.css"), "utf8");
 const theme = readStyleEntry(new URL("../js/lib/theme.css", import.meta.url));
@@ -493,21 +495,52 @@ test("PromptSelector uses the spacious reference size as its default and resize 
 	assert.doesNotMatch(theme, /\.lg-node:has\(\.aa-prompt-selector\):not\(\[data-collapsed\]\) \{[^}]*min-width:/);
 });
 
-test("filter dropdowns reuse the shared animated select control", () => {
-	assert.match(ui, /export function selectControl/);
-	assert.match(ui, /aria-expanded/);
-	assert.match(ui, /icon\("moveDown"/);
-	assert.match(ui, /Object\.defineProperty\(root, "value", \{\s*get: \(\) => control\.value/);
+test("category filters reuse the shared searchable tree picker", () => {
+	assert.match(categoryPicker, /export function categoryPicker/);
+	assert.match(categoryPicker, /createAnchoredPopover/);
+	assert.match(categoryPicker, /role: "listbox"/);
+	assert.match(categoryPicker, /record\.pathLabel/);
+	assert.match(categoryPicker, /applyCategoryColor/);
+	assert.match(categoryPicker, /--aa-category-depth/);
+	assert.match(categoryPicker, /visibleIds\.add\(record\.parentId\)/);
+	assert.match(categoryPicker, /const collapsed = new Set\(\)/);
+	assert.match(categoryPicker, /if \(record\.hasChildren\) collapsed\.add\(record\.id\)/);
+	assert.match(categoryPicker, /hiddenByCollapse\.has\(record\.parentId\)/);
+	assert.match(categoryPicker, /aa-category-picker__option-expander/);
+	assert.match(categoryPicker, /"aria-expanded": String\(expanded\)/);
+	assert.match(categoryPicker, /event\.isComposing/);
+	for (const key of ["ArrowDown", "ArrowLeft", "ArrowRight"]) assert.match(categoryPicker, new RegExp(`event\\.key === "${key}"`));
+	assert.match(categoryPicker, /UNCATEGORIZED_CATEGORY_ID/);
+	assert.match(selector, /uncategorizedLabel/);
+	assert.match(selector, /categoryPicker\(\{/);
+	assert.match(workspace, /categoryPicker\(\{/);
 	assert.match(selector, /promptFilterSelect/);
 	assert.match(selector, /selectControl\(\{/);
 	assert.match(workspace, /className: "aa-library-filter-select"/);
-	assert.match(uiStyles, /\.aa-ui-select\.is-open \.aa-ui-select__arrow/);
-	assert.match(uiStyles, /padding-right: 38px/);
-	assert.match(ui, /syncOptionColor/);
-	assert.match(ui, /--aa-ui-select-option-color/);
-	assert.match(categoryColor, /export function categorySelectOption/);
-	assert.match(selector, /value: option\.id, color: option\.color/);
-	assert.match(workspace, /categories\.map\(categorySelectOption\)/);
+	assert.match(categoryColor, /export function applyCategoryColor/);
+});
+
+test("category manager locks accessible tree editing, movement, and rollback contracts", () => {
+	assert.match(categoryManager, /role: "treeitem"/);
+	assert.match(categoryManager, /"aria-level": String\(record\.depth \+ 1\)/);
+	assert.match(categoryManager, /"aria-expanded": String\(expanded\)/);
+	assert.match(categoryManager, /createCategory\(\{ name, parentId: draftParentId \}\)/);
+	assert.match(categoryManager, /compositionstart/);
+	assert.match(categoryManager, /compositionend/);
+	assert.match(categoryManager, /const EXPAND_DELAY = 450/);
+	assert.match(categoryManager, /zone: "before"/);
+	assert.match(categoryManager, /zone: "after"/);
+	assert.match(categoryManager, /zone: "inside"/);
+	assert.match(categoryManager, /event\.altKey/);
+	for (const key of ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]) assert.match(categoryManager, new RegExp(`"${key}"`));
+	assert.match(categoryManager, /collapsed\.clear\(\)/);
+	assert.match(categoryManager, /row\.addEventListener\("click", \(event\) => \{ if \(!event\.target\.closest\("button, input, select, textarea, a, \[contenteditable='true'\]"\)\) toggleExpanded\(\); \}\)/);
+	assert.match(categoryManager, /event\.key === "Enter" \|\| event\.key === " "/);
+	assert.match(theme, /\.aa-category-tree-row\.has-children \{ cursor: pointer; \}/);
+	assert.match(theme, /\.aa-category-picker__option-expander \{[^}]*width: 26px;[^}]*height: 32px;/);
+	assert.match(categoryManager, /deleteDescendants/);
+	assert.match(categoryManager, /localCategories = optimistic/);
+	assert.match(categoryManager, /finally \{[\s\S]*localCategories = null; localTree = null/);
 });
 
 test("workspace empty states and compact action bars keep narrow sidebars deliberate", () => {

@@ -30,13 +30,110 @@ class GalleryRandomSamplingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((args[3], args[4]), ("random", None))
         self.assertEqual(args[-1], ("watermark",))
 
-    async def test_danbooru_random_search_uses_sampling_metatag_instead_of_full_sort(self):
+    async def test_danbooru_two_tag_search_keeps_both_slots_and_sends_free_rating_metatag(self):
+        adapter = DanbooruAdapter()
+        adapter._get_json = AsyncMock(return_value=[
+            {"id": 7, "rating": "g", "preview_file_url": "https://cdn.donmai.us/7.jpg"},
+            {"id": 8, "rating": "e", "preview_file_url": "https://cdn.donmai.us/8.jpg"},
+        ])
+        for credentials in ({}, {"username": "member", "apiKey": "secret"}):
+            page = await adapter.search(None, "original fantasy", ["general"], "latest", None, 20, credentials)
+            self.assertEqual(adapter._get_json.await_args.kwargs["params"]["tags"], "original fantasy rating:general")
+            self.assertEqual([post.post_id for post in page.posts], ["7"])
+
+    async def test_danbooru_id_cursor_uses_indexed_pagination(self):
         adapter = DanbooruAdapter()
         adapter._get_json = AsyncMock(return_value=[])
-        await adapter.search(None, "blue_hair", ["general"], "random", None, 60, {})
+        credentials = {"username": "member", "apiKey": "secret"}
+        page = await adapter.search_id_cursor(None, "original fantasy", ["general"], "a0", 60, credentials)
+        self.assertEqual(page.page, 1)
+        self.assertEqual(adapter._get_json.await_args.kwargs["params"], {
+            "tags": "original fantasy rating:general",
+            "page": "a0",
+            "limit": 60,
+            "login": "member",
+            "api_key": "secret",
+        })
+        with self.assertRaisesRegex(ValueError, "post id cursor is invalid"):
+            await adapter.search_id_cursor(None, "original fantasy", ["general"], "1000", 60, credentials)
+
+    async def test_danbooru_native_random_keeps_rating_and_applies_local_filters(self):
+        adapter = DanbooruAdapter()
+        adapter._get_json = AsyncMock(return_value=[
+            {"id": 7, "rating": "g", "preview_file_url": "https://cdn.donmai.us/7.jpg"},
+            {"id": 8, "rating": "e", "preview_file_url": "https://cdn.donmai.us/8.jpg"},
+            {"id": 9, "rating": "g", "tag_string": "watermark", "preview_file_url": "https://cdn.donmai.us/9.jpg"},
+        ])
+        page = await adapter.search(None, "blue_hair", ["general"], "random", None, 60, {}, ("watermark",))
         tags = adapter._get_json.await_args.kwargs["params"]["tags"]
         self.assertEqual(tags, "blue_hair rating:general random:60")
         self.assertNotIn("order:random", tags)
+        self.assertEqual([post.post_id for post in page.posts], ["7"])
+        self.assertIn("local-blacklist-filtered", page.warnings)
+
+    async def test_danbooru_two_tag_random_search_uses_cached_id_bounds(self):
+        latest = GalleryPage((SimpleNamespace(post_id="1000"),), None, True)
+        oldest = GalleryPage((SimpleNamespace(post_id="100"),), None, True)
+        sampled = GalleryPage((SimpleNamespace(post_id="500"),), None, True)
+        for credentials in ({}, {"username": "member", "apiKey": "secret"}):
+            with self.subTest(credentials=credentials):
+                adapter = DanbooruAdapter()
+                adapter.search = AsyncMock(return_value=latest)
+                adapter.search_id_cursor = AsyncMock(side_effect=(oldest, sampled, sampled))
+                cache = TTLCache(8, 300)
+                with patch("nodes.gallery.random_sampling.secrets.randbelow", return_value=399):
+                    first = await sample_search(adapter, None, "original   fantasy", ["general"], 30, credentials, ("blocked",), cache)
+                    second = await sample_search(adapter, None, "original fantasy", ["general"], 30, credentials, ("blocked",), cache)
+                self.assertIs(first, sampled)
+                self.assertIs(second, sampled)
+                adapter.search.assert_awaited_once_with(None, "original fantasy", ["general"], "latest", "1", 60, credentials, ())
+                self.assertEqual([call.args[3] for call in adapter.search_id_cursor.await_args_list], ["a0", "b500", "b500"])
+                self.assertEqual(adapter.search_id_cursor.await_args_list[0].args[4:], (60, credentials, ()))
+                self.assertEqual(adapter.search_id_cursor.await_args_list[-1].args[4:], (30, credentials, ("blocked",)))
+
+    async def test_danbooru_id_bounds_are_isolated_by_rating_and_account(self):
+        latest = GalleryPage((SimpleNamespace(post_id="1000"),), None, True)
+        oldest = GalleryPage((SimpleNamespace(post_id="100"),), None, True)
+        sampled = GalleryPage((SimpleNamespace(post_id="500"),), None, True)
+        adapter = DanbooruAdapter()
+        adapter.search = AsyncMock(return_value=latest)
+        adapter.search_id_cursor = AsyncMock(side_effect=(oldest, sampled, sampled, oldest, sampled, oldest, sampled))
+        cache = TTLCache(8, 300)
+        alice = {"username": "Alice", "apiKey": "first"}
+        bob = {"username": "Bob", "apiKey": "second"}
+        cases = (
+            ("original   fantasy", ["general"], alice),
+            ("original fantasy", ["general"], alice),
+            ("original fantasy", ["sensitive"], alice),
+            ("original fantasy", ["general"], bob),
+        )
+        with patch("nodes.gallery.random_sampling.secrets.randbelow", return_value=399):
+            for query, ratings, credentials in cases:
+                await sample_search(adapter, None, query, ratings, 60, credentials, (), cache)
+        self.assertEqual(adapter.search.await_count, 3)
+        self.assertEqual([call.args[3] for call in adapter.search_id_cursor.await_args_list].count("a0"), 3)
+
+    async def test_danbooru_empty_cursor_result_falls_back_to_filtered_latest_page(self):
+        latest_probe = GalleryPage((SimpleNamespace(post_id="1000"),), None, True)
+        filtered_latest = GalleryPage((SimpleNamespace(post_id="999"),), None, True)
+        oldest = GalleryPage((SimpleNamespace(post_id="100"),), None, True)
+        adapter = DanbooruAdapter()
+        adapter.search = AsyncMock(side_effect=(latest_probe, filtered_latest))
+        adapter.search_id_cursor = AsyncMock(side_effect=(oldest, GalleryPage((), None, True)))
+        with patch("nodes.gallery.random_sampling.secrets.randbelow", return_value=399):
+            result = await sample_search(
+                adapter, None, "original fantasy", ["general"], 60, {}, ("blocked",), TTLCache(8, 300),
+            )
+        self.assertIs(result, filtered_latest)
+        self.assertEqual(adapter.search.await_args_list[0].args[-1], ())
+        self.assertEqual(adapter.search.await_args_list[1].args[-1], ("blocked",))
+
+    async def test_danbooru_rejects_queries_above_the_public_tag_limit(self):
+        adapter = DanbooruAdapter()
+        adapter._get_json = AsyncMock(return_value=[])
+        with self.assertRaisesRegex(ValueError, "at most 2 public search tags"):
+            await adapter.search(None, "one two three", [], "latest", None, 60, {"username": "member", "apiKey": "secret"})
+        adapter._get_json.assert_not_awaited()
 
     async def test_aitag_random_search_samples_all_pages_and_caches_only_total_count(self):
         adapter = AITagAdapter()

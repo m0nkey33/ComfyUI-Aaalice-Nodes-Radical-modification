@@ -25,7 +25,6 @@ const workspace = [
 const selector = readFileSync(join(ROOT, "js", "prompt_selector.js"), "utf8");
 const providers = readFileSync(join(ROOT, "js", "lib", "control_providers.js"), "utf8");
 const widgetAdapters = readFileSync(join(ROOT, "js", "lib", "widget_control_adapters.js"), "utf8");
-const nodeControlMenu = readFileSync(join(ROOT, "js", "lib", "node_control_menu.js"), "utf8");
 const workspaceControls = readFileSync(join(ROOT, "js", "lib", "workspace_controls.js"), "utf8");
 const imageCompareControl = readFileSync(join(ROOT, "js", "lib", "controls", "image_compare.js"), "utf8");
 const numericControl = readFileSync(join(ROOT, "js", "lib", "controls", "numeric.js"), "utf8");
@@ -62,6 +61,7 @@ const libraryStore = readFileSync(join(ROOT, "js", "lib", "library_store.js"), "
 const imagePreview = readFileSync(join(ROOT, "js", "lib", "image_preview.js"), "utf8");
 const imageAssetControl = readFileSync(join(ROOT, "js", "lib", "image_asset_control.js"), "utf8");
 const imageAssets = readFileSync(join(ROOT, "js", "lib", "image_assets.js"), "utf8");
+const virtualGrid = readFileSync(join(ROOT, "js", "lib", "virtual_grid.js"), "utf8");
 const promptEntryDetails = readFileSync(join(ROOT, "js", "lib", "prompt_entry_details.js"), "utf8");
 const categoryColor = readFileSync(join(ROOT, "js", "lib", "category_color.js"), "utf8");
 const ui = uiSource;
@@ -207,14 +207,14 @@ test("shared dialogs mount immediately without obsolete open calls", () => {
 	assert.match(workspace, /function openCardActions[\s\S]*?dialog = createDialog/);
 });
 
-test("node context-menu add is independent from layout edit mode", () => {
-	assert.match(workspace, /function patchNodeMenu/);
+test("node context-menu add uses the official extension API exactly once and ignores layout edit mode", () => {
+	assert.match(workspace, /getNodeMenuItems\(node\) \{ return buildNodeMenuItems\(node\); \}/);
+	assert.equal((workspace.match(/getNodeMenuItems\(node\) \{ return buildNodeMenuItems\(node\); \}/g) || []).length, 1);
 	assert.match(workspace, /📌 Add controls to sidebar/);
 	assert.match(workspace, /const fallbackPageId = page\?\.id \|\| model\.pages\[0\]\?\.id \|\| ""[\s\S]*preferredDashboardPage\(model\.pages, dashboardPageMatchLabels\(node\), fallbackPageId\)/);
-	const menuBody = workspace.match(/function patchNodeMenu[\s\S]*?\n}/)?.[0] || "";
+	const menuBody = workspace.match(/function nodeMenuItems[\s\S]*?export function getNodeMenuItems/)?.[0] || "";
 	assert.doesNotMatch(menuBody, /editMode/);
-	assert.match(menuBody, /installNodeControlMenu/);
-	assert.match(nodeControlMenu, /listControls\(this\)/);
+	assert.doesNotMatch(workspace, /patchNodeMenu|installNodeControlMenu|getExtraMenuOptions/);
 	assert.match(workspace, /editMode \?[^\n]*Done/);
 });
 
@@ -431,6 +431,12 @@ test("image inputs share a native-shaped asset browser and separate upload actio
 	assert.match(imageAssetControl, /className: "aa-image-asset-control__select"/);
 	assert.match(imageAssetControl, /iconName: "folderSearch"/);
 	assert.match(imageAssetControl, /createAssetBrowser/);
+	assert.match(imageAssetControl, /mountVirtualGrid/);
+	assert.match(imageAssetControl, /virtualGrid\.setItems\(visible/);
+	assert.match(virtualGrid, /virtualGridRange/);
+	assert.match(virtualGrid, /ResizeObserver/);
+	assert.match(theme, /\.aa-image-assets \{[^}]*height: min\(620px, calc\(100vh - 16px\)\)[^}]*overflow: hidden/);
+	assert.match(theme, /\.aa-image-assets__results \{[^}]*min-height: 0[^}]*overflow-y: auto[^}]*scrollbar-gutter: stable/);
 	assert.match(imageAssetControl, /segmentedControl/);
 	assert.match(imageAssetControl, /value: "all"/);
 	assert.match(imageAssetControl, /value: "inputs"/);
@@ -453,8 +459,8 @@ test("image inputs share a native-shaped asset browser and separate upload actio
 	assert.match(workspaceControls, /const imageLabels =/);
 	assert.match(workspaceControls, /"image-choice": imageLabels/);
 	assert.match(workspaceControls, /image: imageLabels/);
-	assert.match(theme, /\.aa-image-assets__results\.is-grid/);
-	assert.match(theme, /\.aa-image-assets__results\.is-list/);
+	assert.match(theme, /\.aa-virtual-grid__item/);
+	assert.match(theme, /\.aa-image-assets__results\.is-list \.aa-image-assets__item/);
 	assert.match(theme, /\.aa-image-asset-control\s*\{[^}]*gap:\s*0/s);
 	assert.match(theme, /\.aa-image-asset-control__select\s*\{[^}]*border-radius:\s*8px 0 0 8px/s);
 	assert.match(theme, /\.aa-image-asset-control__upload\.aa-ui-button\s*\{[^}]*border-radius:\s*0 8px 8px 0/s);
